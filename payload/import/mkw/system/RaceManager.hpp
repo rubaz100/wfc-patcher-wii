@@ -23,7 +23,12 @@ public:
     public:
         FILL(0x00, 0x08);
         /* 0x08 */ u8 m_id;
-        FILL(0x09, 0x40);
+        FILL(0x09, 0x20);
+        // Live race rank, 1..playerCount. Confirmed consistent with the proven
+        // m_id/m_raceFinishTime offsets (SeekyCt/mkw-structures RaceinfoPlayer);
+        // sanity-check in Dolphin before relying on it for elimination.
+        /* 0x20 */ u8 m_position;
+        FILL(0x21, 0x40);
         /* 0x40 */ Time* m_raceFinishTime;
     };
 
@@ -35,7 +40,12 @@ public:
         FINISHED_TIME_ATTACK = 4,
     };
 
-    FILL(0x00, 0x14);
+    FILL(0x00, 0x0C);
+
+    // Array of per-player race data pointers (length = player count).
+    /* 0x0C */ Player** m_players;
+
+    FILL(0x10, 0x14);
 
     /* 0x14 */ Timer* m_timer;
 

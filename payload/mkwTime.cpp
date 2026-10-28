@@ -3,6 +3,7 @@
 #  include "import/mkw/system/RaceConfig.hpp"
 #  include "import/mkw/system/RaceManager.hpp"
 #  include "import/revolution.h"
+#  include "mkwKnockout.hpp"
 #  include "wwfcGPReport.hpp"
 #  include "wwfcHostPlatform.hpp"
 #  include "wwfcPatch.hpp"
@@ -86,6 +87,11 @@ void FixRaceFinishTime(RaceManager::Player& player)
         scenario.getPlayer(player.m_id)->m_type != RaceConfig::Player::EPlayerType::MASTER) {
         return;
     }
+
+    // M2 sanity-check: report the local player's final race rank so
+    // RaceManager::Player::m_position (offset 0x20) can be confirmed in the
+    // server log before it drives elimination.
+    Knockout::OnPlayerFinished(player);
 
     auto result = GetElapsedMsec(s_raceStartMs);
     if (!result.has_value()) {

@@ -16,6 +16,7 @@
 #include "mkwAntiFreeze.cpp"
 #include "mkwBugFix.cpp"
 #include "mkwFeature.cpp"
+#include "mkwKnockout.cpp"
 #include "mkwOpenHostPage.cpp"
 #include "mkwSecurity.cpp"
 #include "mkwTime.cpp"
