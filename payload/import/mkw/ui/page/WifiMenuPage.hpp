@@ -9,24 +9,9 @@
 namespace wwfc::mkw::UI
 {
 
-void LayoutUIControl_setMessage(void* control, u32 messageId, const FormatParam* formatParam);
-
 class WifiMenuPage : public Page
 {
 public:
-    void renameButtons()
-    {
-        static const FormatParam worldwideFormatParam{
-            .strings = { L"LAN Party" },
-        };
-        static const FormatParam regionalFormatParam{
-            .strings = { L"Knockout Mode" },
-        };
-
-        LayoutUIControl_setMessage(reinterpret_cast<u8*>(this) + 0x230, 0x19CA, &worldwideFormatParam);
-        LayoutUIControl_setMessage(reinterpret_cast<u8*>(this) + 0x484, 0x19CA, &regionalFormatParam);
-    }
-
     void showMessageOfTheDay()
     {
         if (s_hasSeenMessageOfTheDay) {
@@ -77,9 +62,8 @@ private:
 
 static_assert(sizeof(WifiMenuPage) == 0xF34);
 
-inline void WifiMenuPage_onActivate(mkw::UI::WifiMenuPage* wifiMenuPage)
+inline void WifiMenuPage_showMessageOfTheDay(mkw::UI::WifiMenuPage* wifiMenuPage)
 {
-    wifiMenuPage->renameButtons();
     wifiMenuPage->showMessageOfTheDay();
 }
 
