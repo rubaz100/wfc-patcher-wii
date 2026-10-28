@@ -22,6 +22,11 @@ const wchar_t* WifiMenuPage::s_messageOfTheDay = L"Welcome to\nWiiLink Wi-Fi Con
 wchar_t        WifiMenuPage::s_messageOfTheDayBuffer[256] = {};
 bool           WifiMenuPage::s_hasSeenMessageOfTheDay     = false;
 
+WWFC_DEFINE_CTR_STUB(
+    RMCXD_PORT(0x8063DDB4, 0x8060AAA0, 0x8063D420, 0x8062C0CC, 0x8063E2E8),
+    void LayoutUIControl_setMessage(void* control, u32 messageId, const FormatParam* formatParam)
+);
+
 } // namespace wwfc::mkw::UI
 
 namespace wwfc::mkw::Feature
@@ -78,13 +83,13 @@ WWFC_DEFINE_PATCH = Patch::BranchWithCTR(
     )
 );
 
-// Display the Message Of The Day when a client connects to the server
+// Set custom menu labels and display the Message Of The Day when a client connects to the server
 WWFC_DEFINE_PATCH = Patch::BranchWithCTR(
     WWFC_PATCH_LEVEL_FEATURE,
     RMCXD_PORT(0x8064BCD4, 0x806189C0, 0x8064B340, 0x80639FEC, 0x8064C208),
 
     ASM_LAMBDA(
-        ( : ASM_IMPORT_AS(i, UI::WifiMenuPage_showMessageOfTheDay, ShowMessageOfTheDay)),
+        ( : ASM_IMPORT_AS(i, UI::WifiMenuPage_onActivate, OnActivate)),
         // clang-format off
             mr        r3, r31;
             
@@ -93,7 +98,7 @@ WWFC_DEFINE_PATCH = Patch::BranchWithCTR(
             mtlr      r0;
             addi      r1, r1, 0x10;
             
-            b         %[ShowMessageOfTheDay];
+            b         %[OnActivate];
         // clang-format on
     )
 );

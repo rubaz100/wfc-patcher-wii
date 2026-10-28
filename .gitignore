@@ -51,3 +51,7 @@ launcher/build
 *.dol
 *.wad
 *.app
+
+# Build key output — never commit
+misc/private-key-OUT.pem
+misc/wwfcPayloadPublicKey-OUT.hpp
