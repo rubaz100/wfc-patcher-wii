@@ -12,12 +12,31 @@ namespace wwfc::GPReport
 
 void Report(const char* key, const char* string)
 {
-    auto connection = DWC::stpMatchCnt->connection;
+    // stpMatchCnt is null once the DWC match context is torn down (race over,
+    // disconnect, back to menu). Report() runs every frame via Process::Tick ->
+    // Time::Tick while a finish-time report is pending, so a pending report that
+    // outlives the match context would dereference a null stpMatchCnt here --
+    // connection sits at offset 0, so the load faults reading address 0.
+    auto matchCnt = DWC::stpMatchCnt;
+    if (matchCnt == nullptr) {
+        return;
+    }
+
+    auto connection = matchCnt->connection;
     if (connection == nullptr) {
         return;
     }
 
     auto iconnection = reinterpret_cast<GameSpy::GPIConnection*>(*connection);
+    if (iconnection == nullptr) {
+        // During teardown the GPConnection handle outlives its inner
+        // GPIConnection: *connection goes null while connection itself does
+        // not, so the guard above is not enough. Appending to
+        // &iconnection->outputBuffer would hand the game a near-null pointer
+        // (outputBuffer is at offset 0x210), faulting inside
+        // gpiAppendStringToBuffer at 0x210/0x214/0x218.
+        return;
+    }
 
     GameSpy::gpiAppendStringToBuffer(connection, &iconnection->outputBuffer, "\\wl:report\\\\");
     GameSpy::gpiAppendStringToBuffer(connection, &iconnection->outputBuffer, key);
