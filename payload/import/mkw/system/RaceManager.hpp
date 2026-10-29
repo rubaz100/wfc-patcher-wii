@@ -26,9 +26,13 @@ public:
         FILL(0x09, 0x20);
         // Live race rank, 1..playerCount. Confirmed consistent with the proven
         // m_id/m_raceFinishTime offsets (SeekyCt/mkw-structures RaceinfoPlayer);
-        // sanity-check in Dolphin before relying on it for elimination.
+        // validated live via wl:ko_pos.
         /* 0x20 */ u8 m_position;
-        FILL(0x21, 0x40);
+        FILL(0x21, 0x24);
+        // Lap the player is currently on (1-based); increments as they cross the
+        // line. mkw-structures RaceinfoPlayer.currentLap.
+        /* 0x24 */ u16 m_currentLap;
+        FILL(0x26, 0x40);
         /* 0x40 */ Time* m_raceFinishTime;
     };
 
@@ -49,7 +53,11 @@ public:
 
     /* 0x14 */ Timer* m_timer;
 
-    FILL(0x18, 0x28);
+    // Array of player ids ordered by finishing position: [0] is 1st place,
+    // [playerCount-1] is last. mkw-structures Raceinfo.playerIdInEachPosition.
+    /* 0x18 */ u8* m_playerIdInEachPosition;
+
+    FILL(0x1C, 0x28);
 
     /* 0x28 */ EState m_state;
 };

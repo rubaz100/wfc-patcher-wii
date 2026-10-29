@@ -124,6 +124,11 @@ public:
         return m_gameMode == EGameMode::WIFI_FRIEND_VS || m_gameMode == EGameMode::WIFI_PUBLIC_VS;
     }
 
+    u8 playerCount() const
+    {
+        return m_playerCount;
+    }
+
     bool isWifiBattle() const
     {
         return m_gameMode == EGameMode::WIFI_PUBLIC_BATTLE ||
