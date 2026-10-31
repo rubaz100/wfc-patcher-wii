@@ -21,6 +21,8 @@ namespace wwfc::mkw::UI
 const wchar_t* WifiMenuPage::s_messageOfTheDay = L"Welcome to\nWiiLink Wi-Fi Connection!";
 wchar_t        WifiMenuPage::s_messageOfTheDayBuffer[256] = {};
 bool           WifiMenuPage::s_hasSeenMessageOfTheDay     = false;
+wchar_t        WifiMenuPage::s_queuedNotice[128]          = {};
+bool           WifiMenuPage::s_hasQueuedNotice            = false;
 
 } // namespace wwfc::mkw::UI
 

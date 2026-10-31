@@ -12,10 +12,17 @@ namespace wwfc::Knockout
 // position@0x20 can be confirmed against the server log.
 void OnPlayerFinished(mkw::RaceManager::Player& player);
 
-// Called every frame (from wwfc::Process::Tick). M2 elimination decision
-// (leader-lap, last-out): when the race leader completes a lap, computes the
-// current last-place player id and reports it (report-only, no elimination
-// yet) so the decision can be validated against the server log.
+// Synthetic knockout finishes must not be rewritten/reported as ordinary
+// race times by mkwTime's shared retail finish hook.
+bool           NormalizeRetiredFinish(mkw::RaceManager::Player& player);
+bool           IsSpectatorTestRoom();
+bool           IsEliminated(u8 playerId);
+const wchar_t* EliminationNotice(u8 hudSlot);
+u32            NoticeGeneration();
+
+// Called every frame (from wwfc::Process::Tick). Reports lap-boundary
+// decisions. Active PAL builds apply only server-negotiated, owner-authored
+// decisions; ordinary races and incompatible rooms never apply eliminations.
 void Tick();
 
 } // namespace wwfc::Knockout

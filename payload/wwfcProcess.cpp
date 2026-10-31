@@ -1,6 +1,7 @@
 #if RMC // Mario Kart Wii only for now
 
 #  include "mkwKnockout.hpp"
+#  include "mkwOnlineCPU.hpp"
 #  include "mkwTime.hpp"
 #  include "wwfcPatch.hpp"
 
@@ -14,6 +15,7 @@ namespace wwfc::Process
 void Tick()
 {
     Time::Tick();
+    OnlineCPU::Tick();
     Knockout::Tick();
 }
 

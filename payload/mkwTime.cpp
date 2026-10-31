@@ -78,6 +78,17 @@ std::optional<u64> GetElapsedMsec(u64 ms)
 
 void FixRaceFinishTime(RaceManager::Player& player)
 {
+    if (Knockout::NormalizeRetiredFinish(player)) {
+        return;
+    }
+    if (Knockout::IsSpectatorTestRoom()) {
+        // In the opt-in KO proof use native race times consistently, including
+        // nested finalization callbacks. A later wall-clock correction of the
+        // winner must not move it behind an already finalized retired racer.
+        Knockout::OnPlayerFinished(player);
+        return;
+    }
+
     if (s_raceStartMs == 0) {
         return;
     }

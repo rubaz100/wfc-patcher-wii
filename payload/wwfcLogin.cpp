@@ -6,6 +6,7 @@
 #include "wwfcLog.hpp"
 #include "wwfcPatch.hpp"
 #include "wwfcPayload.hpp"
+#include "mkwOnlineCPU.hpp"
 
 namespace wwfc::Login
 {
@@ -119,6 +120,10 @@ void SendExtendedLogin(
     GameSpy::gpiAppendIntToBuffer(
         connection, outputBuffer, Payload::Header.info.version
     );
+
+#if RMC && WWFC_ONLINE_CPU_APPLY && WWFC_KNOCKOUT_APPLY && RMCPD00
+    GameSpy::gpiAppendStringToBuffer(connection, outputBuffer, "\\wl:cpu_ver\\2");
+#endif
 
     if (authToken[0] != '\0') {
         s32 fd = RVL::IOS_Open("/dev/es", 0);

@@ -43,6 +43,8 @@ public:
     /* 0xDE */ u16          m_gpRankScore;
     /* 0xE0 */ u8           m_gpRank;
     /* 0xE1 */ u8           m_startPos;
+    /* 0xE2 */ u8           m_finishPos;
+    /* 0xE3 */ u8           m_0xE3;
     /* 0xE4 */ PlayerRating m_rating;
     /* 0xEC */ u8           m_0xEC;
 };
@@ -129,6 +131,11 @@ public:
         return m_playerCount;
     }
 
+    u8 localPlayerCount() const
+    {
+        return m_localPlayerCount;
+    }
+
     bool isWifiBattle() const
     {
         return m_gameMode == EGameMode::WIFI_PUBLIC_BATTLE ||
@@ -151,6 +158,42 @@ public:
             AT(RMCXD_PORT(0x8052E434, 0x805298EC, 0x8052DDB4, 0x8051C48C, 0x8052DC50));
         return getPlayer(this, index);
     }
+
+#  if RMCPD00
+    // These adapters run after the native menu-scenario Init and before its
+    // records are copied into the race scenario or any karts are allocated.
+    void initScenarioForOnlineCPU(const RaceConfig* previous)
+    {
+        [[gnu::longcall]] void init(RaceConfig*, const RaceConfig*) AT(0x8052FB90);
+        init(this, previous);
+    }
+
+    bool recomputeOnlineCPUPlayerCount(u8 expected)
+    {
+        u8 count = 0, screens = 0, local = 0;
+        [[gnu::longcall]] void compute(const RaceConfig*, u8*, u8*, u8*) AT(0x8052F788);
+        compute(this, &count, &screens, &local);
+        if (count != expected || local != m_localPlayerCount) {
+            return false;
+        }
+        // Native Init may temporarily use one intro camera. CPU slots add no
+        // local controllers, so preserve its screen/local counts and HUD map.
+        m_playerCount = count;
+        return true;
+    }
+
+    void configureOnlineCPUSettings(u32 seed)
+    {
+        m_cpuMode    = ECPUMode::NORMAL;
+        m_seedFixed  = seed;
+        m_seedRandom = seed;
+    }
+
+    bool teamsEnabled() const
+    {
+        return (m_modeFlags & MODE_FLAGS_TEAMS) != 0;
+    }
+#  endif
 
 private:
     /* 0x004 */ u8               m_playerCount;
@@ -179,6 +222,7 @@ private:
 };
 
 static_assert(sizeof(RaceConfig) == 0xBF0);
+static_assert(sizeof(RaceConfigPlayer) == 0xF0);
 
 class RaceConfigManager
 {
