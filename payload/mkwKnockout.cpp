@@ -585,9 +585,13 @@ void Tick()
         Decision decision = {};
         if (!s_raceState.evaluate(snapshot, decision))
             return;
-        u8 placement = 1;
+        // Naturally finished racers still occupy places ahead of the next
+        // victim. Decision::survivors contains only unfinished racers, so it
+        // cannot determine the final placement on its own.
+        u8        placement = 0;
+        const u16 excluded  = s_raceState.eliminatedMask() | snapshot.disconnectedMask;
         for (u8 id = 0; id < count; ++id) {
-            if (decision.survivors & (1u << id))
+            if (!(excluded & (1u << id)))
                 ++placement;
         }
         OnlineCPU::PublishKnockout(decision.leaderLap, decision.playerId, placement);
