@@ -18,6 +18,7 @@ bool           NormalizeRetiredFinish(mkw::RaceManager::Player& player);
 bool           IsSpectatorTestRoom();
 bool           IsEliminated(u8 playerId);
 const wchar_t* EliminationNotice(u8 hudSlot);
+bool           CopyEliminationNotice(u8 hudSlot, wchar_t (&output)[128], u32& generation);
 u32            NoticeGeneration();
 
 // Called every frame (from wwfc::Process::Tick). Reports lap-boundary

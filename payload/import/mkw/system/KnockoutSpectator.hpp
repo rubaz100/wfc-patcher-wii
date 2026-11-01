@@ -58,10 +58,22 @@ struct ExistingCameraManager {
             return false;
         }
         auto camera = cameraManagerForSpectating->cameras[0];
-        if (!camera || camera->indexesSortedCameras) {
+        if (!camera || camera->indexesSortedCameras ||
+            !KartManagerForRetirement::CanRetire(playerId)) {
             return false;
         }
-        camera->playerId = playerId;
+        if (camera->playerId != playerId) {
+            camera->playerId = playerId;
+            // Refresh vehicle-specific settings and seed both native camera
+            // histories from the new kart. Do this once per target change,
+            // never restart the opening pan or switch camera-array indices.
+            [[gnu::longcall]] void refreshSettings(ExistingRaceCamera*) AT(0x805A4C08);
+            [[gnu::longcall]] void resetAddedFov(ExistingRaceCamera*) AT(0x805A4DDC);
+            [[gnu::longcall]] void resetFromKart(ExistingRaceCamera*) AT(0x805A49BC);
+            refreshSettings(camera);
+            resetAddedFov(camera);
+            resetFromKart(camera);
+        }
         return true;
     }
 };

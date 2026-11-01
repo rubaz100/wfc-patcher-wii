@@ -39,4 +39,47 @@ bool FormatEliminationNotice(Char (&output)[N], u8 placement, bool spectating = 
            (!spectating || append("\nNow spectating"));
 }
 
+// The retail Wi-Fi finish pane supports three lines. The caller supplies a
+// one-based display number (a CPU ordinal for CPUs), or zero when every
+// eligible racer has finished and the canonical results are still pending.
+// The placement-only reconnect notice deliberately uses the formatter above.
+template <typename Char, decltype(sizeof(0)) N>
+bool FormatSpectatorNotice(
+    Char (&output)[N], u8 placement, u8 targetNumber, bool targetCPU, bool automatic
+)
+{
+    if (!FormatEliminationNotice(output, placement, false))
+        return false;
+    if (targetNumber > 12) {
+        output[0] = 0;
+        return false;
+    }
+    decltype(sizeof(0)) used = 0;
+    while (output[used])
+        ++used;
+    auto append = [&](const char* text) {
+        while (*text) {
+            if (used + 1 >= N) {
+                output[used] = 0;
+                return false;
+            }
+            output[used++] = static_cast<Char>(*text++);
+        }
+        output[used] = 0;
+        return true;
+    };
+    if (!targetNumber)
+        return append("\nWaiting for results");
+    char number[3] = {};
+    if (targetNumber >= 10) {
+        number[0] = '1';
+        number[1] = '0' + targetNumber % 10;
+    } else {
+        number[0] = '0' + targetNumber;
+    }
+    return append(targetCPU ? "\nWatching CPU " : "\nWatching racer ") && append(number) &&
+           append(automatic ? " (Auto)" : " (Manual)") &&
+           append("\nD-pad: Left/Right view, Down auto");
+}
+
 } // namespace wwfc::Knockout

@@ -1,4 +1,4 @@
-# Current integration: 0.3.7 / protocol 3
+# Current integration: 0.3.8 / protocol 3
 
 The M3 notes below are historical. The regular release now builds PAL with both
 CPU and Knockout adapters, freezes the mode in an agreed public/private VS plan,
@@ -7,9 +7,10 @@ Human spectators and CPU retirement share the same grid. Native retirement
 readiness retries separately from event acceptance, and pre-existing terminal
 flags are preserved. Only one local human per console is supported for Knockout.
 
-This integration is compiled only, with no automated or live tests at the user's
-request. See the root README and docs/online-cpus.md. Previous candidate test
-results do not establish live success for the combined release.
+The user confirmed the basic two-Dolphin race/disconnect flow works on 0.3.7.
+Version 0.3.8 adds M4 spectator controls and HUD polish, with compilation/source
+review only. No automated tests or autonomous races are run at the user's
+request. See the root docs/knockout-spectator-controls.md for scope/validation.
 
 The user's 0.3.5 run reached elimination, but an unfinished spectator disconnected
 about 35 seconds later, and the host later hit 91010 before in-game results.
@@ -19,10 +20,11 @@ one GP append per record. Pending finish/item state survives queue rejection.
 Server framing also drains complete records ahead of partial TCP tails.
 
 The native online VS AFK check still considers an unfinished eliminated human.
-The active PAL path now resets its input idle counters via native leaf
+The 0.3.6 PAL path reset its input idle counters via native leaf
 `0x805235AC` using InputManager singleton `0x809BD70C`, scoped to an eliminated
 unfinished local MASTER racer. Ordinary active-racer AFK and the race time cap
-are preserved. KO placement state also survives native finishing stages 3/4.
+were preserved. Version 0.3.7 replaces that reset as described below. KO
+placement state also survives native finishing stages 3/4.
 
 The finish-notice opacity override did not activate its pane while the spectator
 remained unfinished. A display-only `HasStarted` override at vtable entry
@@ -38,7 +40,17 @@ the audited 16-byte block `0x8053F238`. The shim replays argument construction,
 returns to native comparison `0x8053F248`, and suppresses a true idle result
 only for a negotiated KO race. A queued `wl:ko_afk` records actual suppression
 once per controller/race. Ordinary VS, general disconnects and the separate
-hard race limit remain native. This correction requires a new manual race.
+hard race limit remain native. The user subsequently confirmed this correction
+works in the current two-Dolphin setup.
+
+Version 0.3.8 adds normalized D-pad Left/Right target cycling, Down automatic
+leader following, stable manual selection and native camera refresh on target
+changes. The HUD shows agreed placement, target and mode with three lines
+verified to fit the retail font/pane metrics. It restores native status/empty
+text after spectating ends and uses stable IRQ-copied notice snapshots. No new
+native code hook or finish/network-state change is introduced by this polish.
+Actual visibility, controller behavior, target changes and repeated races still
+need user validation. Native scope remains PAL online VS, one local human.
 
 ---
 

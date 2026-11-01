@@ -18,6 +18,7 @@
 
 #  include "import/mkw/system/RaceConfig.hpp"
 #  include "import/mkw/system/RaceManager.hpp"
+#  include "import/revolution.h"
 #  include "wwfcGPReport.hpp"
 #  include "wwfcPatch.hpp"
 #  include "wwfcTypes.h"
@@ -33,6 +34,7 @@
 #  if WWFC_KNOCKOUT_APPLY
 #    include "import/mkw/net/NetManager.hpp"
 #    include "import/mkw/system/KnockoutSpectator.hpp"
+#    include "import/mkw/system/KnockoutSpectatorInput.hpp"
 #    include "import/mkw/ui/page/WifiMenuPage.hpp"
 #  endif
 
@@ -58,6 +60,15 @@ constinit u32          s_appliedSequence    = 0;
 constinit u16          s_retireEffectMask   = 0;
 constinit u16          s_resultReportedMask = 0;
 constinit u8           s_afkReportedMask    = 0;
+constinit u8           s_spectatorPlayer    = MAX_PLAYERS;
+constinit u8           s_spectatorTarget    = MAX_PLAYERS;
+constinit bool         s_followLeader       = true;
+constinit bool         s_inputReady         = false;
+constinit u32          s_previousInput      = 0;
+constinit u8           s_noticePlacement    = 0;
+constinit u8           s_noticeTarget       = 0;
+constinit bool         s_noticeCPU          = false;
+constinit bool         s_noticeAutomatic    = true;
 
 void Reset()
 {
@@ -70,9 +81,43 @@ void Reset()
     s_retireEffectMask   = 0;
     s_resultReportedMask = 0;
     s_afkReportedMask    = 0;
+    s_spectatorPlayer    = MAX_PLAYERS;
+    s_spectatorTarget    = MAX_PLAYERS;
+    s_followLeader       = true;
+    s_inputReady         = false;
+    s_previousInput      = 0;
+    s_noticePlacement    = 0;
+    s_noticeTarget       = 0;
+    s_noticeCPU          = false;
+    s_noticeAutomatic    = true;
 }
 
 #  if WWFC_KNOCKOUT_APPLY
+
+void PublishNotice(const wchar_t (&notice)[128])
+{
+    // UI glyph construction reads a separate snapshot. Only the fixed copy
+    // and generation commit run with interrupts disabled, never UI/SDK work.
+    const bool interrupts = RVL::OSDisableInterrupts();
+    std::memcpy(s_notice, notice, sizeof(s_notice));
+    ++s_noticeGeneration;
+    RVL::OSRestoreInterrupts(interrupts);
+}
+
+bool IsLocalSpectator(RaceManager& race, RaceConfig& config)
+{
+    if (!IsSpectatorTestRoom() || &race != s_boundRace ||
+        race.m_state != RaceManager::EState::RACE || config.playerCount() != s_gridCount ||
+        s_spectatorPlayer >= s_gridCount || !race.m_players ||
+        config.getPlayer(s_spectatorPlayer)->m_type != RaceConfigPlayer::EPlayerType::MASTER)
+        return false;
+    const auto* player = race.m_players[s_spectatorPlayer];
+    return player && player->m_id == s_spectatorPlayer &&
+           s_raceState.placement(s_spectatorPlayer) &&
+           !(player->m_stateFlags &
+             (RaceManager::Player::FLAG_FINISHED | RaceManager::Player::FLAG_DISCONNECTED |
+              RaceManager::Player::FLAG_RETIRED));
+}
 
 bool IsOnlineVSInputIdle(void* input, u32 controllerIndex, u32 idleLimit, u32 unchangedLimit)
 {
@@ -203,8 +248,14 @@ bool ApplyElimination(RaceManager& race, u8 id, u8 placement)
     s_raceState.markEliminated(id, placement);
     auto& config = RaceConfigManager::Instance()->getConfig();
     if (config.getPlayer(id)->m_type == RaceConfigPlayer::EPlayerType::MASTER) {
-        if (FormatEliminationNotice(s_notice, placement)) {
-            ++s_noticeGeneration;
+        s_spectatorPlayer   = id;
+        s_spectatorTarget   = MAX_PLAYERS;
+        s_followLeader      = true;
+        s_inputReady        = false;
+        s_previousInput     = 0;
+        wchar_t notice[128] = {};
+        if (FormatEliminationNotice(notice, placement)) {
+            PublishNotice(notice);
             wchar_t result[128];
             if (FormatEliminationNotice(result, placement, false)) {
                 UI::WifiMenuPage::QueueNotice(result);
@@ -214,18 +265,103 @@ bool ApplyElimination(RaceManager& race, u8 id, u8 placement)
     return true;
 }
 
-void FollowSurvivor(const Snapshot& snapshot)
+u8 CycleSpectatorTarget(const Snapshot& snapshot, u16 eligible, u8 current, bool next)
 {
-    if (!s_notice[0])
-        return;
-    u16 excluded = s_raceState.eliminatedMask() | snapshot.disconnectedMask | snapshot.finishedMask;
+    u8 start = next ? snapshot.playerCount - 1 : 0;
     for (u8 position = 0; position < snapshot.playerCount; ++position) {
-        u8 id = snapshot.order[position];
-        if (id < snapshot.playerCount && !(excluded & (1u << id))) {
-            ExistingCameraManager::Follow(id);
-            return;
+        if (snapshot.order[position] == current) {
+            start = position;
+            break;
         }
     }
+    for (u8 step = 1; step <= snapshot.playerCount; ++step) {
+        const u8 position =
+            (start + (next ? step : snapshot.playerCount - step)) % snapshot.playerCount;
+        const u8 id = snapshot.order[position];
+        if (eligible & (1u << id))
+            return id;
+    }
+    return MAX_PLAYERS;
+}
+
+void UpdateSpectatorNotice(u8 targetNumber, bool cpu)
+{
+    const u8 placement = s_raceState.placement(s_spectatorPlayer);
+    if (s_notice[0] && placement == s_noticePlacement && targetNumber == s_noticeTarget &&
+        cpu == s_noticeCPU && s_followLeader == s_noticeAutomatic)
+        return;
+    wchar_t notice[128] = {};
+    if (FormatSpectatorNotice(notice, placement, targetNumber, cpu, s_followLeader)) {
+        PublishNotice(notice);
+        s_noticePlacement = placement;
+        s_noticeTarget    = targetNumber;
+        s_noticeCPU       = cpu;
+        s_noticeAutomatic = s_followLeader;
+    }
+}
+
+void FollowSurvivor(RaceManager& race, RaceConfig& config, const Snapshot& snapshot)
+{
+    if (!IsLocalSpectator(race, config)) {
+        s_inputReady    = false;
+        s_previousInput = 0;
+        return;
+    }
+    // Native race ordering can be transient during setup/teardown. Never use
+    // an incomplete permutation to select or index a camera target.
+    u16 seen = 0;
+    for (u8 position = 0; position < snapshot.playerCount; ++position) {
+        const u8 id = snapshot.order[position];
+        if (id >= snapshot.playerCount || (seen & (1u << id)))
+            return;
+        seen |= 1u << id;
+    }
+    const u16 eligible =
+        seen & ~(s_raceState.eliminatedMask() | snapshot.disconnectedMask | snapshot.finishedMask);
+    const auto input   = ReadSpectatorInput(config.getPlayer(s_spectatorPlayer)->m_inputIndex);
+    u32        pressed = 0;
+    if (input.available) {
+        if (s_inputReady)
+            pressed = input.held & ~s_previousInput;
+        s_previousInput = input.held;
+        s_inputReady    = true;
+    } else {
+        s_previousInput = 0;
+        s_inputReady    = false;
+    }
+    if (!eligible) {
+        s_spectatorTarget = MAX_PLAYERS;
+        UpdateSpectatorNotice(0, false);
+        return;
+    }
+    if (s_followLeader || s_spectatorTarget >= snapshot.playerCount ||
+        !(eligible & (1u << s_spectatorTarget)))
+        s_spectatorTarget = CycleSpectatorTarget(snapshot, eligible, MAX_PLAYERS, true);
+    if (pressed & SpectatorInput::LEADER) {
+        s_followLeader    = true;
+        s_spectatorTarget = CycleSpectatorTarget(snapshot, eligible, MAX_PLAYERS, true);
+    } else if (
+        (input.held & (SpectatorInput::PREVIOUS | SpectatorInput::NEXT)) !=
+            (SpectatorInput::PREVIOUS | SpectatorInput::NEXT) &&
+        bool(pressed & SpectatorInput::PREVIOUS) != bool(pressed & SpectatorInput::NEXT)
+    ) {
+        s_followLeader    = false;
+        s_spectatorTarget = CycleSpectatorTarget(
+            snapshot, eligible, s_spectatorTarget, (pressed & SpectatorInput::NEXT) != 0
+        );
+    }
+    if (s_spectatorTarget >= snapshot.playerCount ||
+        !ExistingCameraManager::Follow(s_spectatorTarget))
+        return;
+    const bool cpu    = OnlineCPU::IsCPUSlot(s_spectatorTarget);
+    u8         number = s_spectatorTarget + 1;
+    if (cpu) {
+        const auto* plan = OnlineCPU::CurrentPlan();
+        if (!plan || s_spectatorTarget < plan->humanCount)
+            return;
+        number = s_spectatorTarget - plan->humanCount + 1;
+    }
+    UpdateSpectatorNotice(number, cpu);
 }
 
 void FinalizeRetired(RaceManager& race, const Snapshot& snapshot)
@@ -298,7 +434,30 @@ bool IsEliminated(u8 id)
 
 const wchar_t* EliminationNotice(u8 hudSlot)
 {
-    return hudSlot == 0 && IsSpectatorTestRoom() && s_notice[0] ? s_notice : nullptr;
+#  if WWFC_KNOCKOUT_APPLY
+    auto* race   = RaceManager::Instance();
+    auto* config = RaceConfigManager::Instance();
+    return hudSlot == 0 && race && config && IsLocalSpectator(*race, config->getConfig()) &&
+                   s_notice[0]
+               ? s_notice
+               : nullptr;
+#  else
+    (void) hudSlot;
+    return nullptr;
+#  endif
+}
+
+bool CopyEliminationNotice(u8 hudSlot, wchar_t (&output)[128], u32& generation)
+{
+    output[0]  = 0;
+    generation = 0;
+    if (!EliminationNotice(hudSlot))
+        return false;
+    const bool interrupts = RVL::OSDisableInterrupts();
+    std::memcpy(output, s_notice, sizeof(output));
+    generation = s_noticeGeneration;
+    RVL::OSRestoreInterrupts(interrupts);
+    return output[0] != 0;
 }
 
 u32 NoticeGeneration()
@@ -405,7 +564,7 @@ void Tick()
                 ApplyRetirementEffect(*race, id))
                 s_retireEffectMask |= 1u << id;
         }
-        FollowSurvivor(snapshot);
+        FollowSurvivor(*race, scenario, snapshot);
         if (race->m_timer && s_raceState.survivorsFinished(snapshot) && OnlineCPU::IsOwner() &&
             OnlineCPU::OwnerAlive() && !OnlineCPU::KnockoutFinalBase() &&
             !OnlineCPU::KnockoutDecisionPending()) {
