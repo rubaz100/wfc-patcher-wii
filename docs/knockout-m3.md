@@ -1,4 +1,4 @@
-# Current integration: 0.3.8 / protocol 3
+# Current integration: 0.3.9 / protocol 3
 
 The M3 notes below are historical. The regular release now builds PAL with both
 CPU and Knockout adapters, freezes the mode in an agreed public/private VS plan,
@@ -51,6 +51,14 @@ text after spectating ends and uses stable IRQ-copied notice snapshots. No new
 native code hook or finish/network-state change is introduced by this polish.
 Actual visibility, controller behavior, target changes and repeated races still
 need user validation. Native scope remains PAL online VS, one local human.
+
+The user confirmed D-pad spectating on 0.3.8. Version 0.3.9 retains that path
+and exports agreed KO placement to the web leaderboard. It also adds per-CPU
+guest inventory expiry, retry-safe telemetry chunks and the PAL online menu
+label “Knockdown Mode” in place of “Continental”. The menu's regional route
+and existing server Knockout setting remain the selectors; no new mode pool.
+The user reaffirmed code review/fixes only, with no tests. UI/map/item/12-racer
+validation remains manual.
 
 ---
 

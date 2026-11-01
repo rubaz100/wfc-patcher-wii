@@ -28,8 +28,10 @@ constinit u8   s_frames[12][Wire::FRAME_SIZE]              = {};
 constinit u16  s_valid                                     = 0;
 alignas(4) constinit u8 s_items[12][Wire::ITEM_STATE_SIZE] = {};
 constinit u16           s_itemValid = 0, s_itemDirty = 0;
-constinit u32           s_itemSequence     = 0;
-constinit u32           s_lastItemSend[12] = {};
+constinit u32           s_itemSequence        = 0;
+constinit u32           s_lastItemSend[12]    = {};
+constinit u32           s_lastItemReceive[12] = {};
+constexpr u32 ITEM_STATE_TIMEOUT_TICKS = 300;
 constinit u32           s_ticks = 0, s_lastOwnerTick = 0, s_nonce = 0, s_sequence = 0;
 constinit u32           s_lastPrepareTick = 0;
 constinit bool          s_protocol = false, s_waiting = false, s_committed = false;
@@ -48,6 +50,7 @@ void ResetItemStates()
     s_itemDirty = 0;
     std::memset(s_items, 0, sizeof(s_items));
     std::memset(s_lastItemSend, 0, sizeof(s_lastItemSend));
+    std::memset(s_lastItemReceive, 0, sizeof(s_lastItemReceive));
 }
 
 void ResetKnockoutEvents()
@@ -183,6 +186,7 @@ void Message(const char* text)
         // these bytes until HasItemState confirms an actual race is active.
         std::memcpy(s_items[id], bytes, sizeof(bytes));
         s_itemValid |= 1u << id;
+        s_lastItemReceive[id] = s_ticks;
         s_lastOwnerTick = s_ticks;
         break;
     }
@@ -394,6 +398,12 @@ bool HasItemState(u8 id)
 {
     if (!IsCPUSlot(id) || !OwnerAlive() || !(s_itemValid & (1u << id)) ||
         Knockout::IsEliminated(id) || !RaceScene())
+        return false;
+    // Owner heartbeats and movement cannot keep an old guest inventory alive.
+    // The adapter reconciles an empty ITEM row after 300 transport ticks without
+    // a fresh snapshot. Keep the valid bit/sequence so stale packets cannot
+    // resurrect it; owner captures remain authoritative and do not expire.
+    if (!IsOwner() && s_ticks - s_lastItemReceive[id] >= ITEM_STATE_TIMEOUT_TICKS)
         return false;
     const auto* race = mkw::RaceManager::Instance();
     if (!race || race->m_state != mkw::RaceManager::EState::RACE || !race->m_players ||

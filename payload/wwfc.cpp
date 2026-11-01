@@ -16,6 +16,7 @@
 #include "mkwAntiFreeze.cpp"
 #include "mkwBugFix.cpp"
 #include "mkwFeature.cpp"
+#include "mkwKnockdownMenu.cpp"
 #include "mkwKnockout.cpp"
 #include "mkwKnockoutUI.cpp"
 #include "mkwOnlineCPU.cpp"

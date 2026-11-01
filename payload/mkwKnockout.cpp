@@ -429,7 +429,12 @@ bool IsSpectatorTestRoom()
 
 bool IsEliminated(u8 id)
 {
-    return IsSpectatorTestRoom() && s_raceState.placement(id) != 0;
+    return EliminationPlacement(id) != 0;
+}
+
+u8 EliminationPlacement(u8 id)
+{
+    return IsSpectatorTestRoom() ? s_raceState.placement(id) : 0;
 }
 
 const wchar_t* EliminationNotice(u8 hudSlot)

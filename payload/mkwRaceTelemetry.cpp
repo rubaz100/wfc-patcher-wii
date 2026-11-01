@@ -296,7 +296,8 @@ void SendMap(u32 now, u32 halfSecond)
             Write16(bytes + 18 + i * 4, segment.to);
         }
     }
-    GPReport::ReportB64Encode("wl:race_map", bytes, length);
+    if (!GPReport::ReportB64Encode("wl:race_map", bytes, length))
+        return;
     s_mapOffset += count;
     if (s_mapOffset == total) {
         s_mapOffset = 0;
@@ -390,8 +391,12 @@ void Tick()
             out[1] |= 8;
         Write16(out + 2, player->m_currentLap <= 255 ? player->m_currentLap : 0);
         Write32(out + 4, profile);
-        out[8]               = local;
-        out[9]               = player->m_position <= count ? player->m_position : 0;
+        out[8]                   = local;
+        const u8 eliminatedPlace = Knockout::EliminationPlacement(id);
+        // Stopped karts remain native-unfinished while spectating. Their live
+        // distance rank can move; keep the agreed KO placement on the panel.
+        out[9] = eliminatedPlace ? eliminatedPlace
+                                 : (player->m_position <= count ? player->m_position : 0);
         const float progress = Load<float>(player, 0x0C);
         WriteFloat(out + 12, progress >= 0.0f && progress <= 255.0f ? progress : 0.0f);
         Point point = {};
@@ -403,7 +408,8 @@ void Tick()
         if (flags & mkw::RaceManager::Player::FLAG_FINISHED)
             Write32(out + 24, Milliseconds(player->m_raceFinishTime));
     }
-    GPReport::ReportB64Encode("wl:race_live", bytes, length);
+    if (!GPReport::ReportB64Encode("wl:race_live", bytes, length))
+        return;
     ++s_sequence;
     s_lastSend = now;
     s_hasSent  = true;
