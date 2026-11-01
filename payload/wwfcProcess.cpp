@@ -2,6 +2,7 @@
 
 #  include "mkwKnockout.hpp"
 #  include "mkwOnlineCPU.hpp"
+#  include "mkwRaceTelemetry.hpp"
 #  include "mkwTime.hpp"
 #  include "wwfcPatch.hpp"
 
@@ -17,6 +18,7 @@ void Tick()
     Time::Tick();
     OnlineCPU::Tick();
     Knockout::Tick();
+    RaceTelemetry::Tick();
 }
 
 // Call the tick function every frame

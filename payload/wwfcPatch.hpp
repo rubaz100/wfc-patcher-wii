@@ -100,7 +100,8 @@ CallWithCTR(u8 level, u32 address, auto function, u32 tempReg = 12)
 #define _WWFC_DEFINE_PATCH1(NUM) _WWFC_DEFINE_PATCH2(NUM)
 #define WWFC_DEFINE_PATCH _WWFC_DEFINE_PATCH1(__COUNTER__)
 
-// Silly hack to load this address through a fixup address
+// Load the target through its fixup pointer. The PC-relative pointer offset
+// needs both halves: combined gameplay payloads can exceed signed 16-bit reach.
 #define _WWFC_DEFINE_CTR_STUB2(_ADDRESS, _PROTOTYPE, _COUNTER, ...)            \
     extern int _CTR_STUB_DEST_##_COUNTER AT(_ADDRESS);                         \
     extern "C" {                                                               \
@@ -111,8 +112,9 @@ CallWithCTR(u8 level, u32 address, auto function, u32 tempReg = 12)
     {                                                                          \
         asm volatile("" #__VA_ARGS__ "\n"                                      \
                      "bl 4\n"                                                  \
-                     "mflr 12\n"                                               \
-                     "lwz 12, _CTR_STUB_" #_COUNTER " - (. - 4)(12)\n"         \
+                     "1: mflr 12\n"                                            \
+                     "addis 12, 12, (_CTR_STUB_" #_COUNTER " - 1b)@ha\n"        \
+                     "lwz 12, (_CTR_STUB_" #_COUNTER " - 1b)@l(12)\n"           \
                      "mtctr 12\n"                                              \
                      "bctr\n"                                                  \
                      :);                                                       \
@@ -130,9 +132,10 @@ CallWithCTR(u8 level, u32 address, auto function, u32 tempReg = 12)
         asm volatile("" #__VA_ARGS__ "\n"                                      \
                      "mflr 11\n"                                               \
                      "bl 4\n"                                                  \
-                     "mflr 12\n"                                               \
+                     "1: mflr 12\n"                                            \
                      "mtlr 11\n"                                               \
-                     "lwz 12, _CTR_STUB_" #_COUNTER " - (. - 8)(12)\n"         \
+                     "addis 12, 12, (_CTR_STUB_" #_COUNTER " - 1b)@ha\n"        \
+                     "lwz 12, (_CTR_STUB_" #_COUNTER " - 1b)@l(12)\n"           \
                      "mtctr 12\n"                                              \
                      "bctr\n"                                                  \
                      :);                                                       \

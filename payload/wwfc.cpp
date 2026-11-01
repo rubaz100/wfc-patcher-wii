@@ -23,6 +23,7 @@
 #include "mkwOnlineCPUEvents.cpp"
 #include "mkwOnlineCPUGrid.cpp"
 #include "mkwOnlineCPUNative.cpp"
+#include "mkwRaceTelemetry.cpp"
 #include "mkwOpenHostPage.cpp"
 #include "mkwSecurity.cpp"
 #include "mkwTime.cpp"
