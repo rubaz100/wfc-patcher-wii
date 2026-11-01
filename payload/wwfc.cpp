@@ -19,6 +19,8 @@
 #include "mkwKnockout.cpp"
 #include "mkwKnockoutUI.cpp"
 #include "mkwOnlineCPU.cpp"
+#include "mkwOnlineCPUItems.cpp"
+#include "mkwOnlineCPUEvents.cpp"
 #include "mkwOnlineCPUGrid.cpp"
 #include "mkwOnlineCPUNative.cpp"
 #include "mkwOpenHostPage.cpp"

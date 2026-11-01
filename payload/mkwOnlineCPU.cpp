@@ -22,10 +22,14 @@ namespace wwfc::OnlineCPU
 {
 namespace Transport
 {
-constinit Plan          s_pending                      = {};
-constinit Plan          s_active                       = {};
-constinit u8            s_frames[12][Wire::FRAME_SIZE] = {};
-constinit u16           s_valid                        = 0;
+constinit Plan s_pending                                   = {};
+constinit Plan s_active                                    = {};
+constinit u8   s_frames[12][Wire::FRAME_SIZE]              = {};
+constinit u16  s_valid                                     = 0;
+alignas(4) constinit u8 s_items[12][Wire::ITEM_STATE_SIZE] = {};
+constinit u16           s_itemValid = 0, s_itemDirty = 0;
+constinit u32           s_itemSequence     = 0;
+constinit u32           s_lastItemSend[12] = {};
 constinit u32           s_ticks = 0, s_lastOwnerTick = 0, s_nonce = 0, s_sequence = 0;
 constinit u32           s_lastPrepareTick = 0;
 constinit bool          s_protocol = false, s_waiting = false, s_committed = false;
@@ -38,6 +42,14 @@ constinit u32           s_knockoutFinalBase                    = 0;
 constinit u8            s_pendingKnockout[KNOCKOUT_EVENT_SIZE] = {};
 constinit u32           s_lastKnockoutSend                     = 0;
 
+void ResetItemStates()
+{
+    s_itemValid = 0;
+    s_itemDirty = 0;
+    std::memset(s_items, 0, sizeof(s_items));
+    std::memset(s_lastItemSend, 0, sizeof(s_lastItemSend));
+}
+
 void ResetKnockoutEvents()
 {
     s_knockoutCount     = 0;
@@ -49,6 +61,18 @@ u32 Self()
 {
     auto* user = DWC::DWCi_GetUserData();
     return user ? user->profileId : 0;
+}
+
+bool SnapshotBudgetAvailable()
+{
+    // Replaceable state must not grow the GP output queue while its socket
+    // is stalled. Keep the latest CPU snapshot locally until it drains.
+    const auto* match = DWC::stpMatchCnt;
+    if (!match || !match->connection || !*match->connection)
+        return false;
+    const auto* connection =
+        reinterpret_cast<const GameSpy::GPIConnection*>(*match->connection);
+    return connection->outputBuffer.length >= 0 && connection->outputBuffer.length < 4096;
 }
 
 bool RaceScene()
@@ -79,7 +103,7 @@ bool InPlan(const Plan& plan, u8 id)
 void Message(const char* text)
 {
     // Messages are bounded by the callback before entering this parser.
-    if (std::strncmp(text, "LCPU2:", 6))
+    if (std::strncmp(text, "LCPU3:", 6))
         return;
     const char* p = text + 8;
     u32         a, b, c, d, e, f;
@@ -104,6 +128,7 @@ void Message(const char* text)
             s_valid     = 0;
             s_committed = false;
             ResetKnockoutEvents();
+            ResetItemStates();
         }
         s_pending = { a, b, e, static_cast<u8>(c), static_cast<u8>(d), f != 0 };
         GPReport::ReportU32("wl:cpu_ack", a);
@@ -122,8 +147,10 @@ void Message(const char* text)
         break;
     case 'X':
         if (text[7] == ':' && Wire::Number(p, a, '\0')) {
-            if (s_allocated && s_active.epoch == a)
+            if (s_allocated && s_active.epoch == a) {
                 s_alive = false;
+                ResetItemStates();
+            }
             if (s_pending.epoch == a && !s_allocated) {
                 // A replacement proposal, including a zero-CPU plan, must
                 // commit before SELECT can continue.
@@ -136,6 +163,27 @@ void Message(const char* text)
             }
         }
         break;
+    case 'I': {
+        if (text[7] != ':')
+            break;
+        u8        bytes[Wire::ITEM_STATE_SIZE];
+        const s32 size =
+            DWC::DWC_Base64Decode(p, std::strlen(p), reinterpret_cast<char*>(bytes), sizeof(bytes));
+        const Plan& plan = s_allocated ? s_active : s_pending;
+        if (size != static_cast<s32>(sizeof(bytes)) || !s_committed || !s_alive ||
+            !Wire::ValidItemState(bytes, plan.epoch, plan.humanCount, plan.cpuCount))
+            break;
+        const u8 id = bytes[8];
+        if ((s_itemValid & (1u << id)) &&
+            !Wire::Newer(Wire::Read32(bytes + 4), Wire::Read32(s_items[id] + 4)))
+            break;
+        // Buffering is safe during loading. Native adapters cannot consume
+        // these bytes until HasItemState confirms an actual race is active.
+        std::memcpy(s_items[id], bytes, sizeof(bytes));
+        s_itemValid |= 1u << id;
+        s_lastOwnerTick = s_ticks;
+        break;
+    }
     case 'E': {
         if (text[7] != ':')
             break;
@@ -145,7 +193,8 @@ void Message(const char* text)
         const Plan& plan = s_allocated ? s_active : s_pending;
         if (size != static_cast<s32>(sizeof(bytes)) || !s_committed || !plan.knockoutEnabled ||
             Wire::Read32(bytes) != plan.epoch || s_knockoutFinalBase ||
-            Wire::Read32(bytes + 4) != s_knockoutCount + 1u || bytes[15] || Wire::Read32(bytes + 20))
+            Wire::Read32(bytes + 4) != s_knockoutCount + 1u || bytes[15] ||
+            Wire::Read32(bytes + 20))
             break;
         const u16 previousMask =
             s_knockoutCount ? s_knockoutEvents[s_knockoutCount - 1].eliminatedMask : 0;
@@ -222,7 +271,7 @@ void Buddy(void* connection, const BuddyMessage* argument, void* param)
         u32         length = 0;
         while (length < 256 && text[length])
             ++length;
-        if (length < 256 && length >= 8 && !std::strncmp(text, "LCPU2:", 6)) {
+        if (length < 256 && length >= 8 && !std::strncmp(text, "LCPU3:", 6)) {
             Message(text);
             return;
         }
@@ -339,6 +388,55 @@ u32 RaceDataTimer(u8 id)
     return HasRaceData(id) ? Wire::Read32(s_frames[id] + 40) + 1 : 0;
 }
 
+bool HasItemState(u8 id)
+{
+    if (!IsCPUSlot(id) || !OwnerAlive() || !(s_itemValid & (1u << id)) ||
+        Knockout::IsEliminated(id) || !RaceScene())
+        return false;
+    const auto* race = mkw::RaceManager::Instance();
+    if (!race || race->m_state != mkw::RaceManager::EState::RACE || !race->m_players ||
+        !race->m_players[id])
+        return false;
+    return !(
+        race->m_players[id]->m_stateFlags &
+        (mkw::RaceManager::Player::FLAG_FINISHED | mkw::RaceManager::Player::FLAG_DISCONNECTED |
+         mkw::RaceManager::Player::FLAG_RETIRED)
+    );
+}
+
+const void* ItemState(u8 id)
+{
+    return HasItemState(id) ? s_items[id] + Wire::ITEM_DATA_OFFSET : nullptr;
+}
+
+void CaptureItemState(u8 id, const void* bytes, u32 size)
+{
+    if (!IsOwner() || !IsCPUSlot(id) || !OwnerAlive() || !bytes || size != Wire::ITEM_DATA_SIZE ||
+        Knockout::IsEliminated(id) || !RaceScene())
+        return;
+    const auto* race = mkw::RaceManager::Instance();
+    if (!race || race->m_state != mkw::RaceManager::EState::RACE || !race->m_players ||
+        !race->m_players[id] ||
+        (race->m_players[id]->m_stateFlags &
+         (mkw::RaceManager::Player::FLAG_FINISHED | mkw::RaceManager::Player::FLAG_DISCONNECTED |
+          mkw::RaceManager::Player::FLAG_RETIRED)))
+        return;
+    u8         out[Wire::ITEM_STATE_SIZE] = {};
+    const bool changed = !(s_itemValid & (1u << id)) ||
+                         std::memcmp(s_items[id] + Wire::ITEM_DATA_OFFSET, bytes, size) != 0;
+    Wire::Write32(out, s_active.epoch);
+    Wire::Write32(out + 4, Wire::Read32(s_items[id] + 4));
+    out[8] = id;
+    out[9] = 1;
+    std::memcpy(out + Wire::ITEM_DATA_OFFSET, bytes, size);
+    if (!Wire::ValidItemState(out, s_active.epoch, s_active.humanCount, s_active.cpuCount))
+        return;
+    std::memcpy(s_items[id], out, sizeof(out));
+    s_itemValid |= 1u << id;
+    if (changed)
+        s_itemDirty |= 1u << id;
+}
+
 bool GridCanceled()
 {
     return s_gridCanceled;
@@ -356,6 +454,7 @@ void BeginSelection()
     s_committed    = false;
     s_valid        = 0;
     ResetKnockoutEvents();
+    ResetItemStates();
     if (++s_nonce == 0)
         ++s_nonce;
     s_lastPrepareTick = s_ticks;
@@ -390,6 +489,7 @@ void GridRejected()
     GPReport::ReportU32("wl:cpu_grid_error", s_pending.epoch);
     s_alive = false;
     s_grid  = false;
+    ResetItemStates();
     EndSelection();
 }
 
@@ -429,7 +529,7 @@ void CaptureRaceData(u8 id, const void* bytes, u32 size)
     std::memcpy(out + 48, bytes, 64);
     s_valid |= 1u << id;
     s_lastOwnerTick = s_ticks;
-    if (s_ticks % 3 == 0 &&
+    if (s_ticks % 3 == 0 && SnapshotBudgetAvailable() &&
         Wire::ValidFrame(out, s_active.epoch, s_active.humanCount, s_active.cpuCount))
         GPReport::ReportB64Encode("wl:cpu_frame", out, Wire::FRAME_SIZE);
 }
@@ -509,10 +609,24 @@ void Tick()
         s_gridCanceled = false;
         s_committed    = false;
         ResetKnockoutEvents();
+        ResetItemStates();
         return;
     }
     if (s_committed && IsOwner() && s_ticks % 60 == 0)
         GPReport::ReportU32("wl:cpu_ping", CurrentPlan()->epoch);
+    if (s_allocated && s_grid && IsOwner() && OwnerAlive() && s_ticks % 3 == 0) {
+        for (u8 id = s_active.humanCount; id < s_active.humanCount + s_active.cpuCount; ++id) {
+            const u16 bit = 1u << id;
+            if (!HasItemState(id) || (!(s_itemDirty & bit) && s_ticks - s_lastItemSend[id] < 30))
+                continue;
+            if (!SnapshotBudgetAvailable())
+                break;
+            Wire::Write32(s_items[id] + 4, ++s_itemSequence);
+            GPReport::ReportB64Encode("wl:cpu_item", s_items[id], Wire::ITEM_STATE_SIZE);
+            s_itemDirty &= ~bit;
+            s_lastItemSend[id] = s_ticks;
+        }
+    }
     // SELECT can precede the server's QR2 membership snapshot. Retry while
     // there is no proposal, including membership changes before an epoch exists.
     if (s_protocol && s_waiting && !s_pending.epoch && s_ticks - s_lastPrepareTick >= 180) {
@@ -532,6 +646,7 @@ void Tick()
         s_grid      = false;
         s_allocated = false;
         s_committed = false;
+        ResetItemStates();
     }
 }
 
@@ -604,6 +719,25 @@ const void* RaceData(u8)
 u32 RaceDataTimer(u8)
 {
     return 0;
+}
+
+bool HasItemState(u8)
+{
+    return false;
+}
+
+const void* ItemState(u8)
+{
+    return nullptr;
+}
+
+void CaptureItemState(u8, const void*, u32)
+{
+}
+
+bool EventActorOwnedByAid(u8 playerId, u8 senderAid)
+{
+    return playerId == senderAid;
 }
 
 bool GridCanceled()

@@ -4,8 +4,11 @@
 
 namespace wwfc::OnlineCPU::Wire
 {
-constexpr u32 FRAME_SIZE  = 112;
-constexpr u32 DATA_OFFSET = 48;
+constexpr u32 FRAME_SIZE       = 112;
+constexpr u32 DATA_OFFSET      = 48;
+constexpr u32 ITEM_STATE_SIZE  = 32;
+constexpr u32 ITEM_DATA_OFFSET = 16;
+constexpr u32 ITEM_DATA_SIZE   = 8;
 
 constexpr u16 Read16(const u8* p)
 {
@@ -81,5 +84,22 @@ inline bool ValidFrame(const u8* bytes, u32 epoch, u8 humans, u8 cpus)
     if ((bytes[9] & 2) && (!Read32(bytes + 44) || Read32(bytes + 44) >= 63u * 60000u))
         return false;
     return true;
+}
+
+inline bool ValidItemState(const u8* bytes, u32 epoch, u8 humans, u8 cpus)
+{
+    if (Read32(bytes) != epoch || bytes[8] < humans || bytes[8] >= humans + cpus || humans == 0 ||
+        humans + cpus > 12 || bytes[9] != 1)
+        return false;
+    for (u32 offset = 10; offset < 16; ++offset)
+        if (bytes[offset])
+            return false;
+    for (u32 offset = 21; offset < ITEM_STATE_SIZE; ++offset)
+        if (bytes[offset])
+            return false;
+    const auto validID = [](u8 id) { return id <= 0x12 || id == 0x14; };
+    const u8   stored = bytes[17], dragged = bytes[18];
+    const u8   mode = bytes[19], tail = bytes[20];
+    return validID(stored) && validID(dragged) && mode <= 7 && tail <= 7;
 }
 } // namespace wwfc::OnlineCPU::Wire

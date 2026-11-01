@@ -336,6 +336,12 @@ static bool IsEventPacketDataValid(const void* packet, u8 packetSize, u8 playerA
         static_cast<const NetEventHandler::Packet*>(packet);
     const bool packetChecks = NetManager::Instance()->isEnableAggressivePacketChecks();
 
+    // CPU authority also applies to friend rooms, where aggressive human
+    // packet checks are normally disabled. Collision reports remain native.
+    if (!eventPacket->isCPUActorOwnershipValid(packetSize, playerAid)) {
+        return false;
+    }
+
     // Always ensure that the packet does not contain any invalid item
     // objects, as this can cause a buffer overflow to occur.
     if (wwfc::Payload::g_enableEventItemIdCheck || packetChecks) {

@@ -123,101 +123,10 @@ void* ImportPlayerMetadata(void* gameModeData, u32 playerId)
     return RaceConfigInstance();
 }
 
-bool IsCPUItemPlayer(const void* itemPlayer)
-{
-    return itemPlayer && IsCPUSlot(static_cast<const u8*>(itemPlayer)[0x18]);
-}
-
-// The initial native bridge deliberately gives CPU drivers no inventory. Stock
-// ITEM has only two outgoing slots, while its receive table has twelve. Its
-// periodic writers iterate the actual console's local human IDs; the three
-// externally called writers below also need to reject virtual CPU IDs. Item
-// collision/damage and every human's stock item path remain untouched.
-WWFC_DEFINE_CTR_STUB(
-    0x80797938, void NativeUpdateItemPlayer(void*), stwu r1, -0x40(r1); mflr r0; stw r0, 0x44(r1);
-    stfd f31, 0x30(r1);
-)
-
-void UpdateItemPlayer(void* itemPlayer)
-{
-    if (!IsCPUItemPlayer(itemPlayer))
-        NativeUpdateItemPlayer(itemPlayer);
-}
-
-WWFC_DEFINE_CTR_STUB(
-    0x80798C48, void NativeDecideItem(void*, u32, u32, u32), stwu r1, -0x20(r1); mflr r0;
-    stw r0, 0x24(r1); stw r31, 0x1C(r1);
-)
-
-void DecideItem(void* itemPlayer, u32 playerBox, u32 cpuBox, u32 lotteryType)
-{
-    if (!IsCPUItemPlayer(itemPlayer))
-        NativeDecideItem(itemPlayer, playerBox, cpuBox, lotteryType);
-}
-
-WWFC_DEFINE_CTR_STUB_SAVE_LR(
-    0x807BC950, void NativeSetInventoryItem(void*, u32, bool), mulli r0, r4, 0x1C; lis r6, 0x809C;
-    stw r4, 4(r3); li r4, 0;
-)
-
-void SetInventoryItem(void* inventory, u32 item, bool forced)
-{
-    // In addition to item boxes, Thunder Cloud transfer can grant inventory.
-    // PlayerInventory's first member is its owning Item::Player pointer.
-    const void* itemPlayer = inventory ? *static_cast<void**>(inventory) : nullptr;
-    if (!IsCPUItemPlayer(itemPlayer))
-        NativeSetInventoryItem(inventory, item, forced);
-}
-
-WWFC_DEFINE_CTR_STUB(
-    0x8065C6D0, void NativeSetNetworkItem(void*, u32, u32), stwu r1, -0x20(r1); mflr r0;
-    lis r6, 0x809C; stw r0, 0x24(r1);
-)
-
-void SetNetworkItem(void* handler, u32 playerId, u32 item)
-{
-    if (playerId >= MAX_PLAYERS || !IsCPUSlot(static_cast<u8>(playerId)))
-        NativeSetNetworkItem(handler, playerId, item);
-}
-
-WWFC_DEFINE_CTR_STUB(
-    0x8065C75C, void NativeRemoveNetworkItem(void*, u32), stwu r1, -0x20(r1); mflr r0;
-    stw r0, 0x24(r1); stw r31, 0x1C(r1);
-)
-
-void RemoveNetworkItem(void* handler, u32 playerId)
-{
-    if (playerId >= MAX_PLAYERS || !IsCPUSlot(static_cast<u8>(playerId)))
-        NativeRemoveNetworkItem(handler, playerId);
-}
-
-WWFC_DEFINE_CTR_STUB(
-    0x8065C7F0, void NativeNetworkRouletteEnd(void*, u32), stwu r1, -0x20(r1); mflr r0;
-    stw r0, 0x24(r1); stw r31, 0x1C(r1);
-)
-
-void NetworkRouletteEnd(void* handler, u32 playerId)
-{
-    if (playerId >= MAX_PLAYERS || !IsCPUSlot(static_cast<u8>(playerId)))
-        NativeNetworkRouletteEnd(handler, playerId);
-}
-
 } // namespace wwfc::OnlineCPU::Native
 
 namespace wwfc::OnlineCPU
 {
-
-WWFC_DEFINE_PATCH =
-    Patch::BranchWithCTR(WWFC_PATCH_LEVEL_FEATURE, 0x80797928, Native::UpdateItemPlayer);
-WWFC_DEFINE_PATCH = Patch::BranchWithCTR(WWFC_PATCH_LEVEL_FEATURE, 0x80798C38, Native::DecideItem);
-WWFC_DEFINE_PATCH =
-    Patch::BranchWithCTR(WWFC_PATCH_LEVEL_FEATURE, 0x807BC940, Native::SetInventoryItem);
-WWFC_DEFINE_PATCH =
-    Patch::BranchWithCTR(WWFC_PATCH_LEVEL_FEATURE, 0x8065C6C0, Native::SetNetworkItem);
-WWFC_DEFINE_PATCH =
-    Patch::BranchWithCTR(WWFC_PATCH_LEVEL_FEATURE, 0x8065C74C, Native::RemoveNetworkItem);
-WWFC_DEFINE_PATCH =
-    Patch::BranchWithCTR(WWFC_PATCH_LEVEL_FEATURE, 0x8065C7E0, Native::NetworkRouletteEnd);
 
 // CallWithCTR replaces sixteen bytes, including the three instructions after
 // each original BL. Every shim preserves its return address around the C++ call

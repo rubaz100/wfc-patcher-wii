@@ -3,6 +3,7 @@
 #if RMC
 
 #  include "import/mkw/item/ItemType.hpp"
+#  include "mkwOnlineCPU.hpp"
 #  include "wwfcLibC.hpp"
 
 namespace wwfc::mkw
@@ -78,7 +79,10 @@ public:
 
                 switch (item) {
                 case EItemGeoObjType::KUMO: {
-                    return this->playerAid == playerAid;
+                    // USE stores a global racer ID, including the second
+                    // local human or an agreed CPU. Validate its actual
+                    // console owner instead of comparing unlike ID spaces.
+                    return OnlineCPU::EventActorOwnedByAid(this->playerAid, playerAid);
                 }
                 default: {
                     return true;
@@ -101,6 +105,74 @@ public:
             }
 
             return false;
+        }
+
+        bool isCPUActorOwnershipValid(u8 packetSize, u8 senderAid) const
+        {
+#  if WWFC_ONLINE_CPU_APPLY && RMCPD00
+            const auto* plan = OnlineCPU::CurrentPlan();
+            if (!plan || !plan->cpuCount || !OnlineCPU::IsCPUSlot(plan->humanCount)) {
+                return true;
+            }
+
+            if (packetSize < sizeof(eventInfo) || packetSize > sizeof(Packet)) {
+                return false;
+            }
+            const std::size_t dataSize = packetSize - sizeof(eventInfo);
+            std::size_t       offset   = 0;
+            for (const EventInfo& info : eventInfo) {
+                // SHOOT size comes from a native item-object table. Reject an
+                // unknown object before asking that table for its record size.
+                // The empty slot has no record and is exported as action zero.
+                if (!info.isItemObjectValid()) {
+                    return false;
+                }
+                if (info.itemObject == u8(EItemGeoObjType::EMPTY)) {
+                    if (info.eventType != EventInfo::EEventType::NO_EVENT) {
+                        return false;
+                    }
+                    continue;
+                }
+
+                const std::size_t size = info.getEventDataSize();
+                if (size > dataSize - offset) {
+                    return false;
+                }
+                const u8* data  = eventData + offset;
+                u8        actor = OnlineCPU::MAX_PLAYERS;
+                switch (info.eventType) {
+                case EventInfo::EEventType::ITEM_USED:
+                    if (size < 3) {
+                        return false;
+                    }
+                    actor = data[2];
+                    break;
+                case EventInfo::EEventType::ITEM_THROWN:
+                case EventInfo::EEventType::ITEM_DROPPED:
+                    if (size < 4) {
+                        return false;
+                    }
+                    // BE16(data+2) carries global racer ID in bits 8..11.
+                    actor = data[2] & 0x0F;
+                    break;
+                default:
+                    // Hit and TC transfer events can legitimately be authored
+                    // by a victim/recipient on another console. Keep those on
+                    // their native validation and collision authority paths.
+                    break;
+                }
+                if (OnlineCPU::IsCPUSlot(actor) &&
+                    !OnlineCPU::EventActorOwnedByAid(actor, senderAid)) {
+                    return false;
+                }
+                offset += size;
+            }
+            return offset == dataSize;
+#  else
+            (void)packetSize;
+            (void)senderAid;
+            return true;
+#  endif
         }
 
         bool isValid(u8 packetSize, u8 playerAid) const
