@@ -109,7 +109,17 @@ void CalculateReceivedKart(void* receiver)
     s_decodingPlayerId = previousPlayerId;
 }
 
-void* ImportPlayerMetadata(void* gameModeData, u32 playerId)
+void CalculateReceivedKartFromSub(void* sub, u32 flags)
+{
+    // Reproduce the native remote-only condition before its two calls. The
+    // skipped/local path must still reach the original setup label at 64CC.
+    if (!(flags & 0x8))
+        return;
+    [[gnu::longcall]] void* getReceiver(void*) AT(0x8059144C);
+    CalculateReceivedKart(getReceiver(sub));
+}
+
+void ImportPlayerMetadata(void* gameModeData, u32 playerId)
 {
     if (playerId < MAX_PLAYERS && IsCPUSlot(static_cast<u8>(playerId))) {
         // Stock RH2 imports every non-MASTER slot, including an owner-side CPU,
@@ -119,8 +129,6 @@ void* ImportPlayerMetadata(void* gameModeData, u32 playerId)
         [[gnu::longcall]] void importNativeMetadata(void*, u32) AT(0x8053E47C);
         importNativeMetadata(gameModeData, playerId);
     }
-    // Match the displaced caller's singleton load after the per-player call.
-    return RaceConfigInstance();
 }
 
 } // namespace wwfc::OnlineCPU::Native
@@ -128,10 +136,12 @@ void* ImportPlayerMetadata(void* gameModeData, u32 playerId)
 namespace wwfc::OnlineCPU
 {
 
-// CallWithCTR replaces sixteen bytes, including the three instructions after
-// each original BL. Every shim preserves its return address around the C++ call
-// and reproduces those displaced caller effects before returning to +0x10.
-// The singleton loads in factory/GM shims are performed by their C++ adapters.
+// Each CallWithCTR replaces a complete sixteen-byte block. No native entry may
+// land inside that block: preserve shared labels outside it or replay branches
+// inside the shim. Every shim preserves its return address around the C++ call
+// and reproduces the displaced effects before returning to +0x10.
+// The factory singleton load is performed by its C++ adapter. The GM loop's
+// condition-entry label remains in native code, outside its replacement span.
 
 // Kart factory: player ID is retained in nonvolatile r28. Displaced tail:
 // lis r3,<RaceConfig>; li r4,0; lwz r3,<RaceConfig>(r3).
@@ -154,22 +164,23 @@ WWFC_DEFINE_PATCH = Patch::CallWithCTR(
     )
 );
 
-// KartNetSender::Update -> PacketMgr::ExportRACEDATA, then native epilogue.
+// Keep the no-send branch's 0x8058CB18 epilogue entry outside the patch.
+// Replace argument setup and the ExportRACEDATA call as one block instead.
 WWFC_DEFINE_PATCH = Patch::CallWithCTR(
-    WWFC_PATCH_LEVEL_FEATURE, 0x8058CB14,
+    WWFC_PATCH_LEVEL_FEATURE, 0x8058CB08,
     ASM_LAMBDA(
         ( : ASM_IMPORT_AS(i, Native::ExportRaceData, ExportRaceData)),
         // clang-format off
         stwu r1, -0x20(r1);
         mflr r0;
         stw r0, 0x24(r1);
+        mr r3, r31;
+        addi r4, r30, 0x14;
+        li r5, 0x40;
         bl %[ExportRaceData];
         lwz r0, 0x24(r1);
         mtlr r0;
         addi r1, r1, 0x20;
-        lwz r0, 0x14(r1);
-        lwz r31, 0xC(r1);
-        lwz r30, 0x8(r1);
         blr;
         // clang-format on
     )
@@ -214,43 +225,46 @@ WWFC_DEFINE_PATCH = Patch::CallWithCTR(
 );
 
 // clang-format on
-// KartSub::Update -> KartNetReceiver::Calc. Guard before UnpackPackets and its
-// decoder/interpolation side effects, rather than returning a null packet.
+// Replace the remote flag test and both calls together. The native skip path
+// lands at 0x805964CC, so that shared entry must remain outside the CTR patch.
 WWFC_DEFINE_PATCH = Patch::CallWithCTR(
-    WWFC_PATCH_LEVEL_FEATURE, 0x805964C8,
+    WWFC_PATCH_LEVEL_FEATURE, 0x805964BC,
     ASM_LAMBDA(
-        ( : ASM_IMPORT_AS(i, Native::CalculateReceivedKart, CalculateReceivedKart)),
+        ( : ASM_IMPORT_AS(i, Native::CalculateReceivedKartFromSub, CalculateReceivedKartFromSub)),
         // clang-format off
         stwu r1, -0x20(r1);
-        mflr r0;
-        stw r0, 0x24(r1);
-        bl %[CalculateReceivedKart];
+        mflr r12;
+        stw r12, 0x24(r1);
+        mr r3, r29;
+        mr r4, r0;
+        bl %[CalculateReceivedKartFromSub];
         lwz r0, 0x24(r1);
         mtlr r0;
         addi r1, r1, 0x20;
-        lwz r3, 0(r29);
-        lwz r3, 4(r3);
-        lwz r0, 8(r3);
         blr;
         // clang-format on
     )
 );
 
-// GMDataOnlineVS::Update -> its per-player RH2 import.
+// Replace the complete per-player body, preserving its entry at F2CC and the
+// loop-condition entry at F2DC. The initial forward branch at F2C8 targets
+// F2DC directly; placing a 16-byte patch at the BL (F2D4) would overwrite that
+// label with mtctr and recursively call Update through the stale CTR value.
 WWFC_DEFINE_PATCH = Patch::CallWithCTR(
-    WWFC_PATCH_LEVEL_FEATURE, 0x8053F2D4,
+    WWFC_PATCH_LEVEL_FEATURE, 0x8053F2CC,
     ASM_LAMBDA(
         ( : ASM_IMPORT_AS(i, Native::ImportPlayerMetadata, ImportPlayerMetadata)),
         // clang-format off
         stwu r1, -0x20(r1);
         mflr r0;
         stw r0, 0x24(r1);
+        mr r3, r31;
+        clrlwi r4, r29, 24;
         bl %[ImportPlayerMetadata];
         lwz r0, 0x24(r1);
         mtlr r0;
         addi r1, r1, 0x20;
         addi r29, r29, 1;
-        clrlwi r4, r29, 24;
         blr;
         // clang-format on
     )
