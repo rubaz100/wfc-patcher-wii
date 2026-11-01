@@ -102,7 +102,9 @@ bool Budget(u32 bytes)
     const auto* connection = reinterpret_cast<const GameSpy::GPIConnection*>(*match->connection);
     const s32   length     = connection->outputBuffer.length;
     const u32   added      = ((bytes + 2) / 3) * 4 + 64;
-    return length >= 0 && added < 4096 && static_cast<u32>(length) <= 4096 - added;
+    const u32   pending    = GPReport::PendingBytes();
+    return length >= 0 && added < 4096 && pending <= 4096 - added &&
+           static_cast<u32>(length) <= 4096 - added - pending;
 }
 
 u32 Milliseconds(const mkw::Time* time)

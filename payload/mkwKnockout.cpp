@@ -315,7 +315,7 @@ void Tick()
 {
     RaceManager*       race    = RaceManager::Instance();
     RaceConfigManager* configs = RaceConfigManager::Instance();
-    if (race == nullptr || configs == nullptr || race->m_state != RaceManager::EState::RACE) {
+    if (race == nullptr || configs == nullptr) {
         Reset();
         return;
     }
@@ -326,6 +326,17 @@ void Tick()
     }
     u8 count = scenario.playerCount();
     if (count < 2 || count > MAX_PLAYERS) {
+        Reset();
+        return;
+    }
+    if (race->m_state != RaceManager::EState::RACE) {
+        // Native EndPlayerRace can enter finishing stage 3 inside retirement
+        // finalization. Preserve placements/times through stages 3/4 so the
+        // finish-time hook and results handshake still have their KO state.
+        const u32 stage = static_cast<u32>(race->m_state);
+        if (race == s_boundRace && count == s_gridCount && stage >= 3 && stage <= 4 &&
+            OnlineCPU::KnockoutEnabled())
+            return;
         Reset();
         return;
     }
@@ -372,6 +383,11 @@ void Tick()
             if (s_raceState.placement(id) && !(s_retireEffectMask & (1u << id)) &&
                 ApplyRetirementEffect(*race, id))
                 s_retireEffectMask |= 1u << id;
+            if (s_raceState.placement(id) &&
+                scenario.getPlayer(id)->m_type == RaceConfigPlayer::EPlayerType::MASTER &&
+                !(race->m_players[id]->m_stateFlags &
+                  (RaceManager::Player::FLAG_FINISHED | RaceManager::Player::FLAG_DISCONNECTED)))
+                KeepSpectatorInputActive();
         }
         FollowSurvivor(snapshot);
         if (race->m_timer && s_raceState.survivorsFinished(snapshot) && OnlineCPU::IsOwner() &&

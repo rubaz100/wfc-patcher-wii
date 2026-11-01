@@ -60,6 +60,19 @@ static_assert(__builtin_offsetof(FinishMessageControl, text) == 0x198);
 constinit FinishMessageControl* s_lastNoticeControl    = nullptr;
 constinit u32                   s_lastNoticeGeneration = 0;
 
+bool HasFinishNoticeStarted(FinishMessageControl* control)
+{
+    if (!control)
+        return false;
+    if (EliminationNotice(control->hudSlot))
+        return true;
+    // The native predicate waits for the local FINISHED flag. A spectator
+    // deliberately stays unfinished until canonical completion, but its pane
+    // must start displaying the notice now. This changes display state only.
+    [[gnu::longcall]] bool nativeHasStarted(FinishMessageControl*) AT(0x807F8D08);
+    return nativeHasStarted(control);
+}
+
 void UpdateFinishNotice(FinishMessageControl* control)
 {
     if (!control)
@@ -107,6 +120,10 @@ void UpdateFinishNotice(FinishMessageControl* control)
 // CtrlRaceWifiFinishMessage::vtable + Update (0x10), PAL only.
 WWFC_DEFINE_PATCH =
     Patch::WritePointer(WWFC_PATCH_LEVEL_FEATURE, 0x808D40D0, RaceNotice::UpdateFinishNotice);
+// CtrlRaceBase::UpdatePausePosition uses this predicate to activate the pane,
+// independently of the opacity override above (vtable + HasStarted, 0x4C).
+WWFC_DEFINE_PATCH =
+    Patch::WritePointer(WWFC_PATCH_LEVEL_FEATURE, 0x808D410C, RaceNotice::HasFinishNoticeStarted);
 
 } // namespace wwfc::Knockout
 #endif

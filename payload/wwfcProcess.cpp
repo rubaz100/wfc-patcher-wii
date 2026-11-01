@@ -4,6 +4,7 @@
 #  include "mkwOnlineCPU.hpp"
 #  include "mkwRaceTelemetry.hpp"
 #  include "mkwTime.hpp"
+#  include "wwfcGPReport.hpp"
 #  include "wwfcPatch.hpp"
 
 namespace wwfc::Process
@@ -19,6 +20,7 @@ void Tick()
     OnlineCPU::Tick();
     Knockout::Tick();
     RaceTelemetry::Tick();
+    GPReport::Flush();
 }
 
 // Call the tick function every frame

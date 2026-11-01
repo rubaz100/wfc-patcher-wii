@@ -128,9 +128,11 @@ void FixRaceFinishTime(RaceManager::Player& player)
         finishTime.m_milliseconds = ms;
     }
 
+    const bool interrupts         = RVL::OSDisableInterrupts();
     s_finishTimeReport.inGameTime = inGameMs;
     s_finishTimeReport.difference = difference;
     s_finishTimeReport.finishTime = finishTimeMs;
+    RVL::OSRestoreInterrupts(interrupts);
 }
 
 } // namespace
@@ -178,10 +180,19 @@ void Tick()
     if (s_finishTimeReport.finishTime == 0) {
         return;
     }
-    FinishTimeReport report       = s_finishTimeReport;
-    s_finishTimeReport.finishTime = 0;
-
-    GPReport::ReportB64Encode("wl:mkw_finish_time", &report, sizeof(report));
+    bool                   interrupts = RVL::OSDisableInterrupts();
+    const FinishTimeReport report     = s_finishTimeReport;
+    RVL::OSRestoreInterrupts(interrupts);
+    if (!GPReport::ReportB64Encode("wl:mkw_finish_time", &report, sizeof(report)))
+        return;
+    interrupts = RVL::OSDisableInterrupts();
+    // A concurrent finish callback may have published a newer report while
+    // this one was being encoded. Do not clear that newer pending value.
+    if (s_finishTimeReport.finishTime == report.finishTime &&
+        s_finishTimeReport.inGameTime == report.inGameTime &&
+        s_finishTimeReport.difference == report.difference)
+        s_finishTimeReport.finishTime = 0;
+    RVL::OSRestoreInterrupts(interrupts);
 }
 
 } // namespace wwfc::Time

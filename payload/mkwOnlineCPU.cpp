@@ -72,7 +72,9 @@ bool SnapshotBudgetAvailable()
         return false;
     const auto* connection =
         reinterpret_cast<const GameSpy::GPIConnection*>(*match->connection);
-    return connection->outputBuffer.length >= 0 && connection->outputBuffer.length < 4096;
+    const s32 output = connection->outputBuffer.length;
+    const u32 pending = GPReport::PendingBytes();
+    return output >= 0 && output < 4096 && pending < 4096 - static_cast<u32>(output);
 }
 
 bool RaceScene()
@@ -622,9 +624,10 @@ void Tick()
             if (!SnapshotBudgetAvailable())
                 break;
             Wire::Write32(s_items[id] + 4, ++s_itemSequence);
-            GPReport::ReportB64Encode("wl:cpu_item", s_items[id], Wire::ITEM_STATE_SIZE);
-            s_itemDirty &= ~bit;
-            s_lastItemSend[id] = s_ticks;
+            if (GPReport::ReportB64Encode("wl:cpu_item", s_items[id], Wire::ITEM_STATE_SIZE)) {
+                s_itemDirty &= ~bit;
+                s_lastItemSend[id] = s_ticks;
+            }
         }
     }
     // SELECT can precede the server's QR2 membership snapshot. Retry while

@@ -1,4 +1,4 @@
-# Current integration: 0.3.2 / protocol 2
+# Current integration: 0.3.6 / protocol 3
 
 The M3 notes below are historical. The regular release now builds PAL with both
 CPU and Knockout adapters, freezes the mode in an agreed public/private VS plan,
@@ -10,6 +10,26 @@ flags are preserved. Only one local human per console is supported for Knockout.
 This integration is compiled only, with no automated or live tests at the user's
 request. See the root README and docs/online-cpus.md. Previous candidate test
 results do not establish live success for the combined release.
+
+The user's 0.3.5 run reached elimination, but an unfinished spectator disconnected
+about 35 seconds later, and the host later hit 91010 before in-game results.
+Nested/NUL GP reports support a concurrent native-buffer write defect. Version
+0.3.6 queues whole reports, flushing only after DWC_ProcessFriendsMatch through
+one GP append per record. Pending finish/item state survives queue rejection.
+Server framing also drains complete records ahead of partial TCP tails.
+
+The native online VS AFK check still considers an unfinished eliminated human.
+The active PAL path now resets its input idle counters via native leaf
+`0x805235AC` using InputManager singleton `0x809BD70C`, scoped to an eliminated
+unfinished local MASTER racer. Ordinary active-racer AFK and the race time cap
+are preserved. KO placement state also survives native finishing stages 3/4.
+
+The finish-notice opacity override did not activate its pane while the spectator
+remained unfinished. A display-only `HasStarted` override at vtable entry
+`0x808D410C` now enables the notice during elimination and delegates to native
+`0x807F8D08` otherwise. Independent retail table review uses REL `.data` delta
+`0x1731F0`, not the text delta below. Immediate HUD display, complete results,
+connection retention and repeated races still need the user's manual check.
 
 ---
 
