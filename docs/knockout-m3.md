@@ -1,4 +1,4 @@
-# Current integration: 0.3.6 / protocol 3
+# Current integration: 0.3.7 / protocol 3
 
 The M3 notes below are historical. The regular release now builds PAL with both
 CPU and Knockout adapters, freezes the mode in an agreed public/private VS plan,
@@ -30,6 +30,15 @@ remained unfinished. A display-only `HasStarted` override at vtable entry
 `0x807F8D08` otherwise. Independent retail table review uses REL `.data` delta
 `0x1731F0`, not the text delta below. Immediate HUD display, complete results,
 connection retention and repeated races still need the user's manual check.
+
+The 0.3.6 retry showed a separate pre-elimination gap: the guest left for AFK
+before the first KO event and was never eliminated. Version 0.3.7 replaces the
+eliminated-only counter reset with a scoped native input-idle predicate at
+the audited 16-byte block `0x8053F238`. The shim replays argument construction,
+returns to native comparison `0x8053F248`, and suppresses a true idle result
+only for a negotiated KO race. A queued `wl:ko_afk` records actual suppression
+once per controller/race. Ordinary VS, general disconnects and the separate
+hard race limit remain native. This correction requires a new manual race.
 
 ---
 

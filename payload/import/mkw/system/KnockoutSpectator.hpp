@@ -5,18 +5,6 @@
 namespace wwfc::mkw
 {
 
-inline void KeepSpectatorInputActive()
-{
-    extern void* spectatorInputManager AT(0x809BD70C);
-    if (!spectatorInputManager)
-        return;
-    // Native leaf: resets only the four controller idle-counter pairs. KO
-    // permits one local human; callers invoke this only for an eliminated
-    // unfinished local racer, preserving ordinary racing AFK/race-cap checks.
-    [[gnu::longcall]] void resetIdle(void*) AT(0x805235AC);
-    resetIdle(spectatorInputManager);
-}
-
 // Minimal PAL layouts corroborated against StaticR.rel. These are views of
 // existing race objects, never allocations or scene-level spectator switches.
 struct KartPointersForRetirement {

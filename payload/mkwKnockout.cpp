@@ -19,6 +19,7 @@
 #  include "import/mkw/system/RaceConfig.hpp"
 #  include "import/mkw/system/RaceManager.hpp"
 #  include "wwfcGPReport.hpp"
+#  include "wwfcPatch.hpp"
 #  include "wwfcTypes.h"
 
 #  ifndef WWFC_KNOCKOUT_APPLY
@@ -40,6 +41,10 @@ namespace wwfc::Knockout
 
 using namespace mkw;
 
+#  if WWFC_KNOCKOUT_APPLY
+[[gnu::longcall]] bool NativeIsOnlineVSInputIdle(void*, u32, u32, u32) AT(0x805235D4);
+#  endif
+
 namespace
 {
 
@@ -52,6 +57,7 @@ constinit RaceManager* s_boundRace          = nullptr;
 constinit u32          s_appliedSequence    = 0;
 constinit u16          s_retireEffectMask   = 0;
 constinit u16          s_resultReportedMask = 0;
+constinit u8           s_afkReportedMask    = 0;
 
 void Reset()
 {
@@ -63,9 +69,24 @@ void Reset()
     s_appliedSequence    = 0;
     s_retireEffectMask   = 0;
     s_resultReportedMask = 0;
+    s_afkReportedMask    = 0;
 }
 
 #  if WWFC_KNOCKOUT_APPLY
+
+bool IsOnlineVSInputIdle(void* input, u32 controllerIndex, u32 idleLimit, u32 unchangedLimit)
+{
+    const bool idle = NativeIsOnlineVSInputIdle(input, controllerIndex, idleLimit, unchangedLimit);
+    if (!idle || controllerIndex > 3 || !IsSpectatorTestRoom())
+        return idle;
+    // The native check can expire before the first KO decision. Suppress only
+    // this input-idle decision for the agreed KO race, leaving the separate
+    // hard race limit and ordinary network/disconnect handling intact.
+    const u8 bit = 1u << controllerIndex;
+    if (!(s_afkReportedMask & bit) && GPReport::ReportU32("wl:ko_afk", controllerIndex))
+        s_afkReportedMask |= bit;
+    return false;
+}
 
 u32 Milliseconds(const mkw::Time& time)
 {
@@ -383,11 +404,6 @@ void Tick()
             if (s_raceState.placement(id) && !(s_retireEffectMask & (1u << id)) &&
                 ApplyRetirementEffect(*race, id))
                 s_retireEffectMask |= 1u << id;
-            if (s_raceState.placement(id) &&
-                scenario.getPlayer(id)->m_type == RaceConfigPlayer::EPlayerType::MASTER &&
-                !(race->m_players[id]->m_stateFlags &
-                  (RaceManager::Player::FLAG_FINISHED | RaceManager::Player::FLAG_DISCONNECTED)))
-                KeepSpectatorInputActive();
         }
         FollowSurvivor(snapshot);
         if (race->m_timer && s_raceState.survivorsFinished(snapshot) && OnlineCPU::IsOwner() &&
@@ -422,6 +438,24 @@ void Tick()
                  (static_cast<u32>(decision.playerId) << 8) | count;
     GPReport::ReportU32("wl:ko_eliminate", record);
 }
+
+#  if WWFC_KNOCKOUT_APPLY
+// Replace clrlwi/li/li/bl as one block. The input-manager load at 0x8053F234
+// and the result compare/branch at 0x8053F248/0x8053F24C stay native. No native
+// branch, symbol, relocation, or data pointer enters the displaced block.
+WWFC_DEFINE_PATCH = Patch::CallWithCTR(
+    WWFC_PATCH_LEVEL_FEATURE, 0x8053F238,
+    ASM_LAMBDA(
+        ( : ASM_IMPORT(i, IsOnlineVSInputIdle)),
+        // clang-format off
+        clrlwi r4, r0, 24;
+        li r5, 1800;
+        li r6, 3600;
+        b %[IsOnlineVSInputIdle];
+        // clang-format on
+    )
+);
+#  endif
 
 } // namespace wwfc::Knockout
 
