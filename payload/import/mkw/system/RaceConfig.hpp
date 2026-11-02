@@ -131,6 +131,12 @@ public:
         return m_playerCount;
     }
 
+    // Player id shown on the first local screen (the local human in 1P online).
+    u8 localPlayerId() const
+    {
+        return m_screenPlayerIds[0];
+    }
+
     u8 localPlayerCount() const
     {
         return m_localPlayerCount;

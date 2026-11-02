@@ -4,6 +4,7 @@
 #  include "mkwKnockout.hpp"
 #  include "mkwOnlineCPU.hpp"
 #  include "mkwRaceTelemetry.hpp"
+#  include "mkwSpeedometer.hpp"
 #  include "mkwTime.hpp"
 #  include "wwfcGPReport.hpp"
 #  include "wwfcPatch.hpp"
@@ -22,6 +23,7 @@ void Tick()
     OnlineCPU::Tick();
     Knockout::Tick();
     RaceTelemetry::Tick();
+    Speedometer::Tick();
     GPReport::Flush();
 }
 
