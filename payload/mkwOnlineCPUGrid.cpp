@@ -6,6 +6,7 @@
 #  include "import/mkw/net/NetManager.hpp"
 #  include "import/mkw/system/RaceConfig.hpp"
 #  include "import/mkw/system/RaceManager.hpp"
+#  include "mkwKnockdownMode.hpp"
 #  include "mkwOnlineCPU.hpp"
 #  include "wwfcPatch.hpp"
 
@@ -47,6 +48,14 @@ void InitScenario(RaceConfig* scenario, const RaceConfig* previous)
         return;
     }
     const Plan* committed = CurrentPlan();
+    // A dedicated-mode selection cannot silently allocate an ordinary grid
+    // if its server capability or agreed KO plan disappeared while loading.
+    if (scenario->isWifiVSRace() && Knockdown::Selected() &&
+        (!Knockdown::ServerAvailable() || !committed || !committed->knockoutEnabled ||
+         scenario->localPlayerCount() != 1)) {
+        RejectGrid();
+        return;
+    }
     if (!committed || !scenario->isWifiVSRace())
         return;
     const Plan plan = *committed;

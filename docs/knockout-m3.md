@@ -1,4 +1,4 @@
-# Current integration: 0.3.9 / protocol 3
+# Current integration: 0.3.10 / protocol 3
 
 The M3 notes below are historical. The regular release now builds PAL with both
 CPU and Knockout adapters, freezes the mode in an agreed public/private VS plan,
@@ -59,6 +59,16 @@ label “Knockdown Mode” in place of “Continental”. The menu's regional ro
 and existing server Knockout setting remain the selectors; no new mode pool.
 The user reaffirmed code review/fixes only, with no tests. UI/map/item/12-racer
 validation remains manual.
+
+Version 0.3.10 supersedes the label-only behavior with a dedicated public
+Knockdown pool (`vs_19279`) and independent pool capability1. The 1P entry
+goes directly to VS matchmaking; unsupported 2P/server choices show a message.
+Worldwide is normal VS; private rooms use their existing Knockout setting.
+CPU settings still apply to all VS rooms. Scope is selected through two
+audited VS-key format blocks and the existing custom-area convention, without
+changing native system/save regions. Client grid and server admission refuse
+unsupported-mode ordinary fallback. See root docs/knockdown-mode.md. No tests
+or races run; matching/isolation/error/repeat-round validation remains manual.
 
 ---
 

@@ -13,6 +13,7 @@
 #    include "import/mkw/system/RaceConfig.hpp"
 #    include "import/mkw/system/RaceManager.hpp"
 #    include "import/mkw/system/System.hpp"
+#    include "mkwKnockdownMode.hpp"
 #    include "mkwKnockout.hpp"
 #    include "wwfcGPReport.hpp"
 #    include "wwfcLibC.hpp"
@@ -28,10 +29,10 @@ constinit u8   s_frames[12][Wire::FRAME_SIZE]              = {};
 constinit u16  s_valid                                     = 0;
 alignas(4) constinit u8 s_items[12][Wire::ITEM_STATE_SIZE] = {};
 constinit u16           s_itemValid = 0, s_itemDirty = 0;
-constinit u32           s_itemSequence        = 0;
-constinit u32           s_lastItemSend[12]    = {};
-constinit u32           s_lastItemReceive[12] = {};
-constexpr u32 ITEM_STATE_TIMEOUT_TICKS = 300;
+constinit u32           s_itemSequence           = 0;
+constinit u32           s_lastItemSend[12]       = {};
+constinit u32           s_lastItemReceive[12]    = {};
+constexpr u32           ITEM_STATE_TIMEOUT_TICKS = 300;
 constinit u32           s_ticks = 0, s_lastOwnerTick = 0, s_nonce = 0, s_sequence = 0;
 constinit u32           s_lastPrepareTick = 0;
 constinit bool          s_protocol = false, s_waiting = false, s_committed = false;
@@ -73,10 +74,9 @@ bool SnapshotBudgetAvailable()
     const auto* match = DWC::stpMatchCnt;
     if (!match || !match->connection || !*match->connection)
         return false;
-    const auto* connection =
-        reinterpret_cast<const GameSpy::GPIConnection*>(*match->connection);
-    const s32 output = connection->outputBuffer.length;
-    const u32 pending = GPReport::PendingBytes();
+    const auto* connection = reinterpret_cast<const GameSpy::GPIConnection*>(*match->connection);
+    const s32   output     = connection->outputBuffer.length;
+    const u32   pending    = GPReport::PendingBytes();
     return output >= 0 && output < 4096 && pending < 4096 - static_cast<u32>(output);
 }
 
@@ -187,7 +187,7 @@ void Message(const char* text)
         std::memcpy(s_items[id], bytes, sizeof(bytes));
         s_itemValid |= 1u << id;
         s_lastItemReceive[id] = s_ticks;
-        s_lastOwnerTick = s_ticks;
+        s_lastOwnerTick       = s_ticks;
         break;
     }
     case 'E': {
@@ -277,9 +277,15 @@ void Buddy(void* connection, const BuddyMessage* argument, void* param)
         u32         length = 0;
         while (length < 256 && text[length])
             ++length;
-        if (length < 256 && length >= 8 && !std::strncmp(text, "LCPU3:", 6)) {
-            Message(text);
-            return;
+        if (length < 256 && length >= 8) {
+            if (!std::strncmp(text, "LCPU3:", 6)) {
+                Message(text);
+                return;
+            }
+            if (!std::strncmp(text, "LKD1:", 5)) {
+                Knockdown::HandleServerMessage(text);
+                return;
+            }
         }
     }
     OriginalBuddy(connection, argument, param);
@@ -475,6 +481,8 @@ void BeginSelection()
 
 bool CanSelectAdvance()
 {
+    if (Knockdown::Selected() && (!Knockdown::ServerAvailable() || !s_protocol))
+        return false;
     return !s_protocol || (s_waiting && s_committed);
 }
 

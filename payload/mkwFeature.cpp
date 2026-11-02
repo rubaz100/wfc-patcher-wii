@@ -3,6 +3,7 @@
 #  include "import/mkw/net/NetSelectHandler.hpp"
 #  include "import/mkw/net/NetUserHandler.hpp"
 #  include "import/mkw/ui/page/WifiMenuPage.hpp"
+#  include "mkwKnockdownMode.hpp"
 #  include "wwfcPatch.hpp"
 
 namespace wwfc
@@ -37,6 +38,8 @@ static GameSpy::GPResult GetMessageOfTheDay(GameSpy::GPResult gpResult, const ch
     if (std::strncmp(message, loginChallenge2Message, sizeof(loginChallenge2Message) - 1)) {
         return gpResult;
     }
+
+    Knockdown::HandleLoginResponse(message);
 
     const char motdKey[] = "\\wl:motd\\";
     char       value[512];
