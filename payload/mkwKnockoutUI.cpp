@@ -84,38 +84,11 @@ bool CopyRaceNotice(u8 slot, wchar_t (&output)[128], u32& generation)
         }
         return true;
     }
-    u8    remaining, total, winner;
-    auto* race    = mkw::RaceManager::Instance();
-    auto* configs = mkw::RaceConfigManager::Instance();
-    if (slot || !race || !configs || !race->m_players ||
-        race->m_state != mkw::RaceManager::EState::RACE ||
-        !ContinuousRaceInfo(remaining, total, winner))
-        return false;
-    for (u8 id = 0; id < total; ++id) {
-        if (configs->getConfig().getPlayer(id)->m_type !=
-            mkw::RaceConfigPlayer::EPlayerType::MASTER)
-            continue;
-        const auto* player = race->m_players[id];
-        if (!player || player->m_id != id ||
-            (player->m_stateFlags & (mkw::RaceManager::Player::FLAG_FINISHED |
-                                     mkw::RaceManager::Player::FLAG_DISCONNECTED)))
-            return false;
-        if (OnlineCPU::RaceKnockoutEnabled()) {
-            const auto* plan = OnlineCPU::CurrentPlan();
-            if (!plan)
-                return false;
-            generation = 0xC0000000u | (remaining << 16) | (plan->seriesRound << 8) |
-                         (plan->knockoutEliminationCount << 4) | total;
-            return FormatRaceKnockoutNotice(
-                output, remaining, total, plan->seriesRound, plan->knockoutEliminationCount
-            );
-        }
-        if (player->m_currentLap > total)
-            return false;
-        const u8 lap = static_cast<u8>(player->m_currentLap);
-        generation   = 0x80000000u | (remaining << 16) | (lap << 8) | total;
-        return FormatKnockdownRaceNotice(output, remaining, total, lap);
-    }
+    // While the local player is still racing, show no notice here: the
+    // "racers remaining" message sat in the bottom-left corner on top of the
+    // placement number. The remaining count still appears on the native/web
+    // HUDs; this notice pane is reserved for the spectator notice, shown only
+    // once the player is eliminated (the elimination-notice branch above).
     return false;
 }
 
@@ -417,24 +390,10 @@ void UpdateRankNum(RankNumControl* control)
     if (!state || !IsRankControl(control))
         return;
 
-    // Spectator: once the local player is eliminated, their frozen placement is
-    // meaningless while they watch other racers, so hide the position number
-    // entirely (the race HUD has no text pane here to print "SPECTATOR"). Reuses
-    // the same owned/restore bookkeeping as the warning blink.
-    if (control->playerId < 12 && IsEliminated(static_cast<u8>(control->playerId))) {
-        if (state->control != control) {
-            *state         = {};
-            state->control = control;
-        }
-        state->picture       = nullptr; // no colour change, only hide
-        u8& hidden           = reinterpret_cast<u8*>(control)[CONTROL_HIDDEN];
-        state->nativeHidden  = hidden;
-        state->appliedHidden = 1;
-        hidden               = 1;
-        state->owned         = true;
-        return;
-    }
-
+    // The placement number stays as the game draws it, in every state: while
+    // racing (no notice covers it now) and while spectating after elimination
+    // (the spectator notice shows the status separately). The warning blink
+    // below is the only thing that touches it.
     if (control->playerId >= 12 || !IsEliminationCandidate(static_cast<u8>(control->playerId))) {
         *state = {};
         return;
