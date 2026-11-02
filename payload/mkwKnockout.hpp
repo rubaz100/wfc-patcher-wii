@@ -21,6 +21,10 @@ u8             EliminationPlacement(u8 playerId);
 const wchar_t* EliminationNotice(u8 hudSlot);
 bool           CopyEliminationNotice(u8 hudSlot, wchar_t (&output)[128], u32& generation);
 u32            NoticeGeneration();
+// Continuous KO uses the full frozen human/CPU grid. Winner is 0xFF until the
+// server relays the authority's canonical completion event.
+bool ContinuousRaceInfo(u8& remaining, u8& total, u8& winner);
+u8   ContinuousLapCount();
 
 // Called every frame (from wwfc::Process::Tick). Reports lap-boundary
 // decisions. Active PAL builds apply only server-negotiated, owner-authored

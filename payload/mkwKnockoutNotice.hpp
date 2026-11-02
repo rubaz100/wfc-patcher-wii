@@ -5,6 +5,36 @@
 namespace wwfc::Knockout
 {
 
+template <typename Char, decltype(sizeof(0)) N>
+bool FormatKnockdownRaceNotice(Char (&output)[N], u8 remaining, u8 total, u8 lap)
+{
+    static_assert(N > 0);
+    output[0] = 0;
+    if (total < 2 || total > 12 || remaining > total || lap > total)
+        return false;
+    decltype(sizeof(0)) used   = 0;
+    auto                append = [&](const char* text) {
+        while (*text) {
+            if (used + 1 >= N)
+                return false;
+            output[used++] = static_cast<Char>(*text++);
+        }
+        output[used] = 0;
+        return true;
+    };
+    auto number = [&](u8 value) {
+        char digits[3] = {};
+        if (value >= 10) {
+            digits[0] = '1';
+            digits[1] = '0' + value % 10;
+        } else
+            digits[0] = '0' + value;
+        return append(digits);
+    };
+    return append("Knockdown - ") && number(remaining) && append(" / ") && number(total) &&
+           append(" remain\nLap ") && number(lap ? lap : 1) && append("\nLast racer out each lap");
+}
+
 // ASCII text expanded to the game's two-byte wchar_t without libc formatting
 // or allocations. Capacity includes the terminator, including failure paths.
 template <typename Char, decltype(sizeof(0)) N>

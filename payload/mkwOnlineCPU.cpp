@@ -35,6 +35,8 @@ constinit u32           s_lastItemReceive[12]    = {};
 constexpr u32           ITEM_STATE_TIMEOUT_TICKS = 300;
 constinit u32           s_ticks = 0, s_lastOwnerTick = 0, s_nonce = 0, s_sequence = 0;
 constinit u32           s_lastPrepareTick = 0;
+constinit u32           s_lastAckTick     = 0;
+constinit u16           s_finishSent      = 0;
 constinit bool          s_protocol = false, s_waiting = false, s_committed = false;
 constinit bool          s_grid = false, s_alive = false, s_sawRaceScene = false;
 constinit bool          s_allocated = false, s_gridCanceled = false;
@@ -42,6 +44,8 @@ constexpr u32           KNOCKOUT_EVENT_SIZE                    = 24;
 constinit KnockoutEvent s_knockoutEvents[12]                   = {};
 constinit u8            s_knockoutCount                        = 0;
 constinit u32           s_knockoutFinalBase                    = 0;
+constinit u8            s_knockoutWinnerId                     = 0xff;
+constinit u16           s_knockoutFinalDisconnected            = 0;
 constinit u8            s_pendingKnockout[KNOCKOUT_EVENT_SIZE] = {};
 constinit u32           s_lastKnockoutSend                     = 0;
 
@@ -56,8 +60,10 @@ void ResetItemStates()
 
 void ResetKnockoutEvents()
 {
-    s_knockoutCount     = 0;
-    s_knockoutFinalBase = 0;
+    s_knockoutCount             = 0;
+    s_knockoutFinalBase         = 0;
+    s_knockoutWinnerId          = 0xff;
+    s_knockoutFinalDisconnected = 0;
     std::memset(s_pendingKnockout, 0, sizeof(s_pendingKnockout));
 }
 
@@ -130,12 +136,14 @@ void Message(const char* text)
         if (s_pending.epoch && a != s_pending.epoch && !Wire::Newer(a, s_pending.epoch))
             break;
         if (a != s_pending.epoch) {
-            s_valid     = 0;
-            s_committed = false;
+            s_valid      = 0;
+            s_finishSent = 0;
+            s_committed  = false;
             ResetKnockoutEvents();
             ResetItemStates();
         }
-        s_pending = { a, b, e, static_cast<u8>(c), static_cast<u8>(d), f != 0 };
+        s_pending     = { a, b, e, static_cast<u8>(c), static_cast<u8>(d), f != 0 };
+        s_lastAckTick = s_ticks;
         GPReport::ReportU32("wl:cpu_ack", a);
         break;
     case 'C':
@@ -199,24 +207,33 @@ void Message(const char* text)
         const Plan& plan = s_allocated ? s_active : s_pending;
         if (size != static_cast<s32>(sizeof(bytes)) || !s_committed || !plan.knockoutEnabled ||
             Wire::Read32(bytes) != plan.epoch || s_knockoutFinalBase ||
-            Wire::Read32(bytes + 4) != s_knockoutCount + 1u || bytes[15] ||
-            Wire::Read32(bytes + 20))
+            Wire::Read32(bytes + 4) != s_knockoutCount + 1u || bytes[15])
             break;
         const u16 previousMask =
             s_knockoutCount ? s_knockoutEvents[s_knockoutCount - 1].eliminatedMask : 0;
         const u16 lap = Wire::Read16(bytes + 8);
         const u8  id = bytes[10], place = bytes[11], kind = bytes[14];
-        const u8  total = plan.humanCount + plan.cpuCount;
-        const u32 base  = Wire::Read32(bytes + 16);
+        const u8  total        = plan.humanCount + plan.cpuCount;
+        const u32 base         = Wire::Read32(bytes + 16);
+        const u32 disconnected = Wire::Read32(bytes + 20);
         if (kind == 1) {
-            if (!previousMask || lap || id != 0xff || place ||
+            if (disconnected || !previousMask || lap || id != 0xff || place ||
                 Wire::Read16(bytes + 12) != previousMask || !base ||
                 base > 63u * 60000u - 1 - MAX_PLAYERS * 10u)
                 break;
             s_knockoutFinalBase = base;
+        } else if (kind == 2) {
+            const u32 grid = (1u << total) - 1;
+            if (lap || id >= total || place != 1 || Wire::Read16(bytes + 12) != previousMask ||
+                (disconnected & ~grid) || (grid & ~(previousMask | disconnected)) != (1u << id) ||
+                !base || base > 63u * 60000u - 1 - MAX_PLAYERS * 10u)
+                break;
+            s_knockoutFinalBase         = base;
+            s_knockoutWinnerId          = id;
+            s_knockoutFinalDisconnected = static_cast<u16>(disconnected);
         } else if (kind == 0) {
-            if (s_knockoutCount >= 11 || base || lap < 2 || lap > 255 || id >= total || place < 2 ||
-                place > total || (previousMask & (1u << id)) ||
+            if (disconnected || s_knockoutCount >= 11 || base || lap < 2 || lap > total ||
+                id >= total || place < 2 || place > total || (previousMask & (1u << id)) ||
                 Wire::Read16(bytes + 12) != (previousMask | (1u << id)) ||
                 (s_knockoutCount && (lap <= s_knockoutEvents[s_knockoutCount - 1].leaderLap ||
                                      place >= s_knockoutEvents[s_knockoutCount - 1].placement)))
@@ -282,7 +299,7 @@ void Buddy(void* connection, const BuddyMessage* argument, void* param)
                 Message(text);
                 return;
             }
-            if (!std::strncmp(text, "LKD1:", 5)) {
+            if (!std::strncmp(text, "LKD2:", 5)) {
                 Knockdown::HandleServerMessage(text);
                 return;
             }
@@ -312,6 +329,41 @@ bool KnockoutDecisionPending()
 u32 KnockoutFinalBase()
 {
     return KnockoutEnabled() ? s_knockoutFinalBase : 0;
+}
+
+u8 KnockoutWinnerId()
+{
+    return KnockoutEnabled() ? s_knockoutWinnerId : 0xff;
+}
+
+u16 KnockoutFinalDisconnectedMask()
+{
+    return KnockoutEnabled() ? s_knockoutFinalDisconnected : 0;
+}
+
+bool PublishKnockoutWinner(u32 base, u8 winner, u16 disconnected)
+{
+    const auto* plan = CurrentPlan();
+    if (!KnockoutEnabled() || !IsOwner() || !OwnerAlive() || KnockoutDecisionPending() ||
+        s_knockoutFinalBase || !plan || winner >= plan->humanCount + plan->cpuCount || !base ||
+        base > 63u * 60000u - 1 - MAX_PLAYERS * 10u)
+        return false;
+    const u16 mask = s_knockoutCount ? s_knockoutEvents[s_knockoutCount - 1].eliminatedMask : 0;
+    const u16 grid = (1u << (plan->humanCount + plan->cpuCount)) - 1;
+    if ((disconnected & ~grid) || (grid & ~(mask | disconnected)) != (1u << winner))
+        return false;
+    std::memset(s_pendingKnockout, 0, sizeof(s_pendingKnockout));
+    Wire::Write32(s_pendingKnockout, plan->epoch);
+    Wire::Write32(s_pendingKnockout + 4, s_knockoutCount + 1);
+    s_pendingKnockout[10] = winner;
+    s_pendingKnockout[11] = 1;
+    Wire::Write16(s_pendingKnockout + 12, mask);
+    s_pendingKnockout[14] = 2;
+    Wire::Write32(s_pendingKnockout + 16, base);
+    Wire::Write32(s_pendingKnockout + 20, disconnected);
+    s_lastKnockoutSend = s_ticks;
+    GPReport::ReportB64Encode("wl:ko_event", s_pendingKnockout, sizeof(s_pendingKnockout));
+    return true;
 }
 
 bool ReadKnockoutEvent(u32 after, KnockoutEvent& event)
@@ -471,6 +523,7 @@ void BeginSelection()
     s_pending      = {};
     s_committed    = false;
     s_valid        = 0;
+    s_finishSent   = 0;
     ResetKnockoutEvents();
     ResetItemStates();
     if (++s_nonce == 0)
@@ -550,8 +603,42 @@ void CaptureRaceData(u8 id, const void* bytes, u32 size)
     s_valid |= 1u << id;
     s_lastOwnerTick = s_ticks;
     if (s_ticks % 3 == 0 && SnapshotBudgetAvailable() &&
-        Wire::ValidFrame(out, s_active.epoch, s_active.humanCount, s_active.cpuCount))
-        GPReport::ReportB64Encode("wl:cpu_frame", out, Wire::FRAME_SIZE);
+        Wire::ValidFrame(out, s_active.epoch, s_active.humanCount, s_active.cpuCount) &&
+        GPReport::ReportB64Encode("wl:cpu_frame", out, Wire::FRAME_SIZE) && (out[9] & 2))
+        s_finishSent |= 1u << id;
+}
+
+void RetryFinishedCPUFrames()
+{
+    auto* race = mkw::RaceManager::Instance();
+    if (!s_grid || !IsOwner() || !OwnerAlive() || !RaceScene() || !race || !race->m_players)
+        return;
+    for (u8 id = s_active.humanCount; id < s_active.humanCount + s_active.cpuCount; ++id) {
+        const u16   bit    = 1u << id;
+        auto*       player = race->m_players[id];
+        const auto* time   = player ? player->m_raceFinishTime : nullptr;
+        if (!(s_valid & bit) || (s_finishSent & bit) || Knockout::IsEliminated(id) || !player ||
+            !(player->m_stateFlags & mkw::RaceManager::Player::FLAG_FINISHED) || !time ||
+            !time->m_valid || time->m_minutes >= 63 || time->m_seconds >= 60 ||
+            time->m_milliseconds >= 1000)
+            continue;
+        const u32 finish =
+            time->m_minutes * 60000u + time->m_seconds * 1000u + time->m_milliseconds;
+        if (!finish)
+            continue;
+        if (!SnapshotBudgetAvailable())
+            break;
+        // Retain the last genuine RACEDATA bytes; only refresh observed finish
+        // metadata. Native send callbacks may stop before a final frame queues.
+        u8* out = s_frames[id];
+        Wire::Write32(out + 4, ++s_sequence);
+        Wire::Write16(out + 10, player->m_currentLap);
+        out[9] |= 2;
+        Wire::Write32(out + 44, finish);
+        if (Wire::ValidFrame(out, s_active.epoch, s_active.humanCount, s_active.cpuCount) &&
+            GPReport::ReportB64Encode("wl:cpu_frame", out, Wire::FRAME_SIZE))
+            s_finishSent |= bit;
+    }
 }
 
 void ImportMetadata(void* gameModeData, u8 id)
@@ -634,6 +721,12 @@ void Tick()
     }
     if (s_committed && IsOwner() && s_ticks % 60 == 0)
         GPReport::ReportU32("wl:cpu_ping", CurrentPlan()->epoch);
+    if (s_waiting && !s_committed && s_pending.epoch && s_ticks - s_lastAckTick >= 60) {
+        s_lastAckTick = s_ticks;
+        GPReport::ReportU32("wl:cpu_ack", s_pending.epoch);
+    }
+    if (s_ticks % 3 == 0)
+        RetryFinishedCPUFrames();
     if (s_allocated && s_grid && IsOwner() && OwnerAlive() && s_ticks % 3 == 0) {
         for (u8 id = s_active.humanCount; id < s_active.humanCount + s_active.cpuCount; ++id) {
             const u16 bit = 1u << id;
@@ -677,6 +770,21 @@ WWFC_DEFINE_PATCH = Patch::BranchWithCTR(WWFC_PATCH_LEVEL_FEATURE, 0x800D3648, T
 #  else
 namespace wwfc::OnlineCPU
 {
+u8 KnockoutWinnerId()
+{
+    return 0xff;
+}
+
+u16 KnockoutFinalDisconnectedMask()
+{
+    return 0;
+}
+
+bool PublishKnockoutWinner(u32, u8, u16)
+{
+    return false;
+}
+
 bool KnockoutEnabled()
 {
     return false;

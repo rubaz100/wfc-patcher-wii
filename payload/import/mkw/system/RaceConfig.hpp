@@ -170,7 +170,7 @@ public:
 
     bool recomputeOnlineCPUPlayerCount(u8 expected)
     {
-        u8 count = 0, screens = 0, local = 0;
+        u8                     count = 0, screens = 0, local = 0;
         [[gnu::longcall]] void compute(const RaceConfig*, u8*, u8*, u8*) AT(0x8052F788);
         compute(this, &count, &screens, &local);
         if (count != expected || local != m_localPlayerCount) {
@@ -187,6 +187,14 @@ public:
         m_cpuMode    = ECPUMode::NORMAL;
         m_seedFixed  = seed;
         m_seedRandom = seed;
+    }
+
+    void configureOnlineLapCount(u8 count)
+    {
+        // The constructor adapter allocates this many native Timer entries
+        // before any lap is driven. Do not change an allocated race's bound.
+        if (count >= 1 && count <= 12)
+            m_lapCount = count;
     }
 
     bool teamsEnabled() const

@@ -47,6 +47,24 @@ using namespace mkw;
 [[gnu::longcall]] bool NativeIsOnlineVSInputIdle(void*, u32, u32, u32) AT(0x805235D4);
 [[gnu::longcall]] bool NativeCheckOnlineVSLowSpeed(void*) AT(0x8053EE50);
 [[gnu::longcall]] bool NativeCheckOnlineVSProgress(void*) AT(0x8053EFD4);
+[[gnu::longcall]] bool NativeCanOnlineVSRaceEnd(void*) AT(0x8053FA10);
+[[gnu::longcall]] bool NativeIsConnectedToAnyone(NetManager*) AT(0x80656F00);
+
+// Original PAL constructors/leaf entry words, before the replacement jump.
+// The relocated constant bases in the player constructor are 0x8089xxxx.
+WWFC_DEFINE_CTR_STUB(
+    0x80533EE8, RaceManager::Player* NativeConstructRacePlayer(RaceManager::Player*, u32, u32),
+    stwu r1, -0x20(r1);
+    mflr r0; lis r6, 0x8089; lis r7, 0x8089;
+)
+WWFC_DEFINE_CTR_STUB(
+    0x805349C8, void NativeEndLap(RaceManager::Player*), stwu r1, -0x50(r1); mflr r0;
+    stw r0, 0x54(r1); addi r11, r1, 0x50;
+)
+WWFC_DEFINE_CTR_STUB_SAVE_LR(
+    0x805336B4, u32 NativeLapCount(), lis r4, 0x809C; li r3, 3; lwz r4, -0x28D8(r4);
+    lwz r0, 0xB90(r4);
+)
 #  endif
 
 namespace
@@ -159,6 +177,76 @@ u32 Milliseconds(const mkw::Time& time)
     return time.m_minutes * 60000u + time.m_seconds * 1000u + time.m_milliseconds;
 }
 
+RaceManager::Player* ConstructRacePlayer(RaceManager::Player* player, u32 id, u32 nativeLaps)
+{
+    const u8 laps = ContinuousLapCount();
+    if (laps)
+        nativeLaps = laps;
+    auto* configs = RaceConfigManager::Instance();
+    if (configs && configs->getConfig().isWifiVSRace())
+        // Native scenario Init can retain the previous KO lap byte. Match
+        // metadata to the effective constructor bound on ordinary VS too,
+        // preserving the native competition choice instead of assuming three.
+        configs->getConfig().configureOnlineLapCount(static_cast<u8>(nativeLaps));
+    // The native constructor allocates lapCount * sizeof(Time) entries, so
+    // every later lap-split write has a matching allocation from the start.
+    return NativeConstructRacePlayer(player, id, nativeLaps);
+}
+
+u32 LapCount()
+{
+    const u8 laps = ContinuousLapCount();
+    return laps ? laps : NativeLapCount();
+}
+
+u32 EndLapLimit(u32 nativeLaps)
+{
+    const u8 laps = ContinuousLapCount();
+    return laps ? laps : nativeLaps;
+}
+
+void EndLap(RaceManager::Player* player)
+{
+    const u8 laps = ContinuousLapCount();
+    if (laps && player && player->m_currentLap >= laps) {
+        // Hold the final allocated lap while ordered decisions/winner commit
+        // drain. RaceState consumes any crossed boundaries missed during an
+        // acknowledgement. Never advance into an unallocated split or let a
+        // stock finish substitute for the canonical winner event.
+        *reinterpret_cast<u8*>(reinterpret_cast<u8*>(player) + 0x28) = 0;
+        return;
+    }
+    NativeEndLap(player);
+}
+
+u32 RaceTimeBudget()
+{
+    const u8 laps = ContinuousLapCount();
+    return 300000u * (laps ? laps : 1);
+}
+
+bool RaceFrameBudgetExpired()
+{
+    const auto* race = RaceManager::Instance();
+    if (!race)
+        return false;
+    const u8  laps   = ContinuousLapCount();
+    const u32 budget = laps ? laps * 18000u + 3600u : 21605u;
+    return reinterpret_cast<const u32*>(race)[0x20 / sizeof(u32)] > budget;
+}
+
+bool CanOnlineVSRaceEnd(void* mode)
+{
+    const auto* race    = RaceManager::Instance();
+    auto*       network = NetManager::Instance();
+    if (ContinuousLapCount() && race && race->m_state == RaceManager::EState::RACE &&
+        OnlineCPU::OwnerAlive() && network && NativeIsConnectedToAnyone(network) && race->m_timer &&
+        Milliseconds(race->m_timer->m_time[0]) <= RaceTimeBudget() && !RaceFrameBudgetExpired() &&
+        OnlineCPU::KnockoutWinnerId() == 0xFF)
+        return false;
+    return NativeCanOnlineVSRaceEnd(mode);
+}
+
 bool ReadSnapshot(RaceManager& race, u8 count, Snapshot& snapshot)
 {
     if (count < 2 || count > MAX_PLAYERS || !race.m_players || !race.m_playerIdInEachPosition) {
@@ -178,6 +266,8 @@ bool ReadSnapshot(RaceManager& race, u8 count, Snapshot& snapshot)
         if (player->m_stateFlags & RaceManager::Player::FLAG_DISCONNECTED)
             snapshot.disconnectedMask |= 1u << id;
     }
+    if (OnlineCPU::KnockoutWinnerId() != 0xFF)
+        snapshot.disconnectedMask |= OnlineCPU::KnockoutFinalDisconnectedMask();
     return true;
 }
 
@@ -423,6 +513,26 @@ void FinalizeRetired(RaceManager& race, const Snapshot& snapshot)
         }
     }
 }
+
+void ApplyCanonicalWinner(RaceManager& race, const Snapshot& snapshot)
+{
+    const u8  winner = OnlineCPU::KnockoutWinnerId();
+    const u32 base   = OnlineCPU::KnockoutFinalBase();
+    if (winner >= snapshot.playerCount || !base || !race.m_timer ||
+        s_raceState.soleSurvivor(snapshot) != winner)
+        return;
+    auto* player = race.m_players[winner];
+    if (!player || !player->m_raceFinishTime ||
+        (player->m_stateFlags &
+         (RaceManager::Player::FLAG_FINISHED | RaceManager::Player::FLAG_DISCONNECTED)))
+        return;
+    auto finish           = race.m_timer->m_time[0];
+    finish.m_minutes      = base / 60000;
+    finish.m_seconds      = (base / 1000) % 60;
+    finish.m_milliseconds = base % 1000;
+    finish.m_valid        = true;
+    player->endRace(finish);
+}
 #  endif
 
 } // namespace
@@ -443,6 +553,47 @@ bool IsSpectatorTestRoom()
     auto* configs = RaceConfigManager::Instance();
     return configs && configs->getConfig().isWifiVSRace() &&
            configs->getConfig().localPlayerCount() == 1 && OnlineCPU::KnockoutEnabled();
+#  else
+    return false;
+#  endif
+}
+
+u8 ContinuousLapCount()
+{
+#  if WWFC_KNOCKOUT_APPLY
+    auto*       configs = RaceConfigManager::Instance();
+    const auto* plan    = OnlineCPU::CurrentPlan();
+    if (!configs || !plan || !IsSpectatorTestRoom())
+        return 0;
+    const u8 count = configs->getConfig().playerCount();
+    return count >= 2 && count <= MAX_PLAYERS && count == plan->humanCount + plan->cpuCount ? count
+                                                                                            : 0;
+#  else
+    return 0;
+#  endif
+}
+
+bool ContinuousRaceInfo(u8& remaining, u8& total, u8& winner)
+{
+    remaining = 0;
+    total     = 0;
+    winner    = 0xFF;
+#  if WWFC_KNOCKOUT_APPLY
+    auto*    race  = RaceManager::Instance();
+    const u8 count = ContinuousLapCount();
+    if (!race || race != s_boundRace || !count || count != s_gridCount)
+        return false;
+    Snapshot snapshot = {};
+    if (!ReadSnapshot(*race, count, snapshot))
+        return false;
+    const u16 survivors = s_raceState.survivingMask(snapshot);
+    for (u8 id = 0; id < count; ++id) {
+        if (survivors & (1u << id))
+            ++remaining;
+    }
+    total  = count;
+    winner = OnlineCPU::KnockoutWinnerId();
+    return true;
 #  else
     return false;
 #  endif
@@ -554,22 +705,24 @@ void Tick()
     if (race->m_players == nullptr || race->m_playerIdInEachPosition == nullptr) {
         return;
     }
-    Snapshot snapshot    = {};
+    Snapshot snapshot = {};
+#  if WWFC_KNOCKOUT_APPLY
+    if (!ReadSnapshot(*race, count, snapshot))
+        return;
+#  else
     snapshot.playerCount = count;
     for (u8 id = 0; id < count; ++id) {
-        RaceManager::Player* player = race->m_players[id];
-        if (player == nullptr || player->m_id != id) {
+        const auto* player = race->m_players[id];
+        if (!player || player->m_id != id)
             return;
-        }
         snapshot.order[id] = race->m_playerIdInEachPosition[id];
         snapshot.laps[id]  = player->m_currentLap;
-        if ((player->m_stateFlags & RaceManager::Player::FLAG_FINISHED) != 0) {
+        if (player->m_stateFlags & RaceManager::Player::FLAG_FINISHED)
             snapshot.finishedMask |= 1u << id;
-        }
-        if ((player->m_stateFlags & RaceManager::Player::FLAG_DISCONNECTED) != 0) {
+        if (player->m_stateFlags & RaceManager::Player::FLAG_DISCONNECTED)
             snapshot.disconnectedMask |= 1u << id;
-        }
     }
+#  endif
 #  if WWFC_KNOCKOUT_APPLY
     if (IsSpectatorTestRoom()) {
         s_raceState.bind(count);
@@ -591,13 +744,18 @@ void Tick()
                 s_retireEffectMask |= 1u << id;
         }
         FollowSurvivor(*race, scenario, snapshot);
-        if (race->m_timer && s_raceState.survivorsFinished(snapshot) && OnlineCPU::IsOwner() &&
-            OnlineCPU::OwnerAlive() && !OnlineCPU::KnockoutFinalBase() &&
-            !OnlineCPU::KnockoutDecisionPending()) {
+        const u8 survivor = s_raceState.soleSurvivor(snapshot);
+        if (race->m_timer && survivor < count && OnlineCPU::IsOwner() && OnlineCPU::OwnerAlive() &&
+            !OnlineCPU::KnockoutFinalBase() && !OnlineCPU::KnockoutDecisionPending()) {
             const u32 base = OwnerFinalBase(*race, snapshot);
             if (base)
-                OnlineCPU::PublishKnockoutFinal(base);
+                OnlineCPU::PublishKnockoutWinner(
+                    base, survivor, snapshot.disconnectedMask & ~s_raceState.eliminatedMask()
+                );
         }
+        ApplyCanonicalWinner(*race, snapshot);
+        if (!ReadSnapshot(*race, count, snapshot))
+            return;
         FinalizeRetired(*race, snapshot);
         if (race->m_state != RaceManager::EState::RACE || !OnlineCPU::IsOwner() ||
             !OnlineCPU::OwnerAlive() || OnlineCPU::KnockoutDecisionPending() ||
@@ -629,6 +787,84 @@ void Tick()
 }
 
 #  if WWFC_KNOCKOUT_APPLY
+WWFC_DEFINE_PATCH = Patch::BranchWithCTR(WWFC_PATCH_LEVEL_FEATURE, 0x80533ED8, ConstructRacePlayer);
+WWFC_DEFINE_PATCH = Patch::BranchWithCTR(WWFC_PATCH_LEVEL_FEATURE, 0x805349B8, EndLap);
+WWFC_DEFINE_PATCH = Patch::BranchWithCTR(WWFC_PATCH_LEVEL_FEATURE, 0x805336A4, LapCount);
+// GMDataOnlineVS::CanRaceEnd, including its no-network-peer early return.
+// A committed KO winner owns completion while the authority is still alive.
+WWFC_DEFINE_PATCH = Patch::WritePointer(WWFC_PATCH_LEVEL_FEATURE, 0x808B3930, CanOnlineVSRaceEnd);
+
+// EndLap's shared comparison entry. Preserve the race-config pointer in r5;
+// replay the comparison and its alternate successor outside this block.
+WWFC_DEFINE_PATCH = Patch::CallWithCTR(
+    WWFC_PATCH_LEVEL_FEATURE, 0x80534BD8,
+    ASM_LAMBDA(
+        ( : ASM_IMPORT(i, EndLapLimit)),
+        // clang-format off
+        stwu r1, -0x20(r1);
+        mflr r0;
+        stw r0, 0x24(r1);
+        stw r5, 0x08(r1);
+        mr r3, r4;
+        bl %[EndLapLimit];
+        mr r0, r3;
+        lwz r5, 0x08(r1);
+        lwz r12, 0x24(r1);
+        mtlr r12;
+        addi r1, r1, 0x20;
+        lbz r3, 0x26(r29);
+        cmplw r3, r0;
+        bge 1f;
+        lis r12, 0x8053;
+        ori r12, r12, 0x4C58;
+        mtctr r12;
+        bctr;
+        1: blr;
+        // clang-format on
+    )
+);
+
+// Replace only the inline time-budget argument setup, then restore the native
+// Raceinfo/timer pointers. Ordinary VS retains its five-minute limit.
+WWFC_DEFINE_PATCH = Patch::CallWithCTR(
+    WWFC_PATCH_LEVEL_FEATURE, 0x8053F3B4,
+    ASM_LAMBDA(
+        ( : ASM_IMPORT(i, RaceTimeBudget)),
+        // clang-format off
+        stwu r1, -0x20(r1);
+        mflr r0;
+        stw r0, 0x24(r1);
+        bl %[RaceTimeBudget];
+        mr r4, r3;
+        lwz r5, 0x04(r31);
+        lwz r6, 0x14(r5);
+        lwz r0, 0x24(r1);
+        mtlr r0;
+        addi r1, r1, 0x20;
+        blr;
+        // clang-format on
+    )
+);
+// Preserve the following native branch and its sole GM+114 write. KO's frame
+// budget is its time budget plus sixty seconds, bounded below 63 minutes.
+WWFC_DEFINE_PATCH = Patch::CallWithCTR(
+    WWFC_PATCH_LEVEL_FEATURE, 0x8053F468,
+    ASM_LAMBDA(
+        ( : ASM_IMPORT(i, RaceFrameBudgetExpired)),
+        // clang-format off
+        stwu r1, -0x20(r1);
+        mflr r0;
+        stw r0, 0x24(r1);
+        bl %[RaceFrameBudgetExpired];
+        lwz r0, 0x24(r1);
+        mtlr r0;
+        addi r1, r1, 0x20;
+        cmplwi r3, 0;
+        blr;
+        // clang-format on
+    )
+);
+
 // Preserve the complete native mr/bl/mr/bl pair. Both incoming branches target
 // its first word at 0x8053F444; none enters the interior. The displaced BL
 // relocations reference the two original watchdogs, and no symbol, incoming

@@ -2,9 +2,11 @@
 // not a guessed control pointer reached through menu/HUD offsets.
 #if RMC && WWFC_KNOCKOUT_APPLY && RMCPD00
 
+#  include "import/mkw/system/RaceConfig.hpp"
 #  include "import/mkw/system/RaceManager.hpp"
 #  include "import/mkw/ui/FormatParam.hpp"
 #  include "mkwKnockout.hpp"
+#  include "mkwKnockoutNotice.hpp"
 #  include "wwfcPatch.hpp"
 
 namespace wwfc::Knockout
@@ -49,7 +51,7 @@ struct FinishMessageControl {
     u8 hudSlot;
     FILL(0x191, 0x198);
     TextPane* text;
-    u32 nativeMessageId;
+    u32       nativeMessageId;
 };
 
 static_assert(sizeof(BmgView) == 0x14);
@@ -65,9 +67,70 @@ static_assert(sizeof(FinishMessageControl) == 0x1A0);
 
 constinit FinishMessageControl* s_lastNoticeControl    = nullptr;
 constinit TextPane*             s_lastNoticePane       = nullptr;
-constinit mkw::RaceManager*      s_lastNoticeRace       = nullptr;
+constinit mkw::RaceManager*     s_lastNoticeRace       = nullptr;
 constinit u32                   s_lastNoticeGeneration = 0;
 constinit u32                   s_lastNativeMessageId  = 0;
+
+bool CopyRaceNotice(u8 slot, wchar_t (&output)[128], u32& generation)
+{
+    if (CopyEliminationNotice(slot, output, generation))
+        return true;
+    u8    remaining, total, winner;
+    auto* race    = mkw::RaceManager::Instance();
+    auto* configs = mkw::RaceConfigManager::Instance();
+    if (slot || !race || !configs || !race->m_players ||
+        race->m_state != mkw::RaceManager::EState::RACE ||
+        !ContinuousRaceInfo(remaining, total, winner))
+        return false;
+    for (u8 id = 0; id < total; ++id) {
+        if (configs->getConfig().getPlayer(id)->m_type !=
+            mkw::RaceConfigPlayer::EPlayerType::MASTER)
+            continue;
+        const auto* player = race->m_players[id];
+        if (!player || player->m_id != id || player->m_currentLap > total)
+            return false;
+        const u8 lap = static_cast<u8>(player->m_currentLap);
+        generation   = 0x80000000u | (remaining << 16) | (lap << 8) | total;
+        return FormatKnockdownRaceNotice(output, remaining, total, lap);
+    }
+    return false;
+}
+
+struct LapControl {
+    void* vtable;
+    FILL(0x04, 0x80);
+    bool hidden;
+};
+
+static_assert(__builtin_offsetof(LapControl, hidden) == 0x80);
+[[gnu::longcall]] void NativeLapInit(LapControl*) AT(0x807EF6E8);
+[[gnu::longcall]] void NativeLapUpdate(LapControl*) AT(0x8063DB00);
+
+void InitLapControl(LapControl* control)
+{
+    if (!control)
+        return;
+    if (control && control->vtable == reinterpret_cast<void*>(0x808D3D18) &&
+        ContinuousLapCount() > 9) {
+        // The retail counter uses a single 0..9 texture frame. The text notice
+        // carries the full lap number instead; never feed 10..12 to that asset.
+        control->hidden = true;
+        return;
+    }
+    NativeLapInit(control);
+}
+
+void UpdateLapControl(LapControl* control)
+{
+    if (!control)
+        return;
+    if (control && control->vtable == reinterpret_cast<void*>(0x808D3D18) &&
+        ContinuousLapCount() > 9) {
+        control->hidden = true;
+        return;
+    }
+    NativeLapUpdate(control);
+}
 
 void ClearNoticeCache()
 {
@@ -111,7 +174,12 @@ bool HasFinishNoticeStarted(FinishMessageControl* control)
 {
     if (!control)
         return false;
-    if (EliminationNotice(control->hudSlot))
+    const auto* race = mkw::RaceManager::Instance();
+    if (control->hudSlot == 0 && race && static_cast<u32>(race->m_state) < 2)
+        ClearNoticeCache();
+    wchar_t notice[128];
+    u32     generation;
+    if (CopyRaceNotice(control->hudSlot, notice, generation))
         return true;
     // The native predicate waits for the local FINISHED flag. A spectator
     // deliberately stays unfinished until canonical completion, but its pane
@@ -138,7 +206,7 @@ void UpdateFinishNotice(FinishMessageControl* control)
     wchar_t notice[128];
     u32     generation = 0;
     auto*   race       = mkw::RaceManager::Instance();
-    if (!CopyEliminationNotice(control->hudSlot, notice, generation)) {
+    if (!CopyRaceNotice(control->hudSlot, notice, generation)) {
         if (control == s_lastNoticeControl && control->text == s_lastNoticePane &&
             race == s_lastNoticeRace && !RestoreNativeMessage(control))
             return;
@@ -189,6 +257,12 @@ WWFC_DEFINE_PATCH =
 // independently of the opacity override above (vtable + HasStarted, 0x4C).
 WWFC_DEFINE_PATCH =
     Patch::WritePointer(WWFC_PATCH_LEVEL_FEATURE, 0x808D410C, RaceNotice::HasFinishNoticeStarted);
+
+// Verified retail vtable + Init/+Update. Ordinary controls retain native code.
+WWFC_DEFINE_PATCH =
+    Patch::WritePointer(WWFC_PATCH_LEVEL_FEATURE, 0x808D3D24, RaceNotice::InitLapControl);
+WWFC_DEFINE_PATCH =
+    Patch::WritePointer(WWFC_PATCH_LEVEL_FEATURE, 0x808D3D28, RaceNotice::UpdateLapControl);
 
 } // namespace wwfc::Knockout
 #endif

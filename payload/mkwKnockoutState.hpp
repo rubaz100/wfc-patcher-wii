@@ -109,7 +109,10 @@ public:
         if (lap <= m_lastLeaderLap) {
             return false;
         }
-        m_lastLeaderLap = lap;
+        // A server acknowledgement may span more than one lap. Consume each
+        // crossed boundary in order instead of losing the intervening round.
+        ++m_lastLeaderLap;
+        lap = m_lastLeaderLap;
         if (lap < 2) {
             // Going from lap 0 to 1 starts the race; it completes no lap.
             return false;
@@ -140,6 +143,26 @@ public:
         u16 survivors =
             ((1u << m_playerCount) - 1) & ~(m_eliminatedMask | snapshot.disconnectedMask);
         return survivors != 0 && (snapshot.finishedMask & survivors) == survivors;
+    }
+
+    u16 survivingMask(const Snapshot& snapshot) const
+    {
+        if (snapshot.playerCount != m_playerCount || m_playerCount < 2 ||
+            m_playerCount > MAX_PLAYERS)
+            return 0;
+        return ((1u << m_playerCount) - 1) & ~(m_eliminatedMask | snapshot.disconnectedMask);
+    }
+
+    u8 soleSurvivor(const Snapshot& snapshot) const
+    {
+        const u16 survivors = survivingMask(snapshot);
+        if (!survivors || (survivors & (survivors - 1)))
+            return MAX_PLAYERS;
+        for (u8 id = 0; id < m_playerCount; ++id) {
+            if (survivors & (1u << id))
+                return id;
+        }
+        return MAX_PLAYERS;
     }
 
     u16 eliminatedMask() const

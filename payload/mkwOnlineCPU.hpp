@@ -40,6 +40,9 @@ struct KnockoutEvent {
 bool KnockoutEnabled();
 bool KnockoutDecisionPending();
 u32  KnockoutFinalBase();
+u8   KnockoutWinnerId();
+u16  KnockoutFinalDisconnectedMask();
+bool PublishKnockoutWinner(u32 baseMilliseconds, u8 winnerId, u16 disconnectedMask);
 bool PublishKnockoutFinal(u32 baseMilliseconds);
 bool ReadKnockoutEvent(u32 afterSequence, KnockoutEvent& event);
 bool PublishKnockout(u16 leaderLap, u8 playerId, u8 placement);

@@ -59,6 +59,10 @@ void InitScenario(RaceConfig* scenario, const RaceConfig* previous)
     if (!committed || !scenario->isWifiVSRace())
         return;
     const Plan plan = *committed;
+    if (plan.knockoutEnabled && !Knockdown::ServerAvailable()) {
+        RejectGrid();
+        return;
+    }
     if (!plan.epoch || !plan.ownerProfileId || !plan.humanCount || plan.humanCount > MAX_PLAYERS ||
         plan.cpuCount > MAX_PLAYERS - plan.humanCount ||
         scenario->playerCount() != plan.humanCount) {
@@ -122,6 +126,8 @@ void InitScenario(RaceConfig* scenario, const RaceConfig* previous)
     }
     if (plan.cpuCount)
         scenario->configureOnlineCPUSettings(plan.seed);
+    if (plan.knockoutEnabled)
+        scenario->configureOnlineLapCount(total);
     OnGridInitialized();
 }
 

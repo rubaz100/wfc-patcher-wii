@@ -1,4 +1,13 @@
-# Current integration: 0.3.11 / protocol 3
+# Current integration: 0.3.12 / CPU protocol 3 / rules 2
+
+Continuous Knockdown allocates a native lap bound for all2–12 racers and
+eliminates once per leader-lap boundary until a canonical winner event arrives.
+The owner publishes a kind2 terminal event naming the sole survivor and DCmask;
+all clients share its time before retired results complete. Native timer
+allocation, end-lap limit, final-lap holding and bounded time/frame budgets are
+scoped to agreed KO. Pool/rules capability2 gates public/private KO, retaining
+ordinary VS with older private participants. CPU ACK/final-frame retries and
+remaining-racer HUDs are included. No tests/races; see root release0.3.12 notes.
 
 Version 0.3.11 closes a spectator motion-watchdog gap: native low-speed and
 no-progress checks still timed out a deliberately stopped eliminated local

@@ -3,7 +3,7 @@
 #ifndef WWFC_PAYLOAD_MAJOR
 #  define WWFC_PAYLOAD_MAJOR 0
 #  define WWFC_PAYLOAD_MINOR 3
-#  define WWFC_PAYLOAD_BETA 11
+#  define WWFC_PAYLOAD_BETA 12
 #endif
 
 static_assert(

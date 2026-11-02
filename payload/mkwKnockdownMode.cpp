@@ -41,9 +41,9 @@ void ResetSession()
 void HandleServerMessage(const char* message)
 {
     // Only the reserved authenticated self-buddy channel dispatches here.
-    if (!std::strcmp(message, "LKD1:S:1"))
+    if (!std::strcmp(message, "LKD2:S:1"))
         s_serverAvailable = true;
-    else if (!std::strcmp(message, "LKD1:S:0"))
+    else if (!std::strcmp(message, "LKD2:S:0"))
         s_serverAvailable = false;
 }
 
@@ -52,7 +52,7 @@ void HandleLoginResponse(const char* message)
     ResetSession();
     char value[8] = {};
     if (GameSpy::gpiValueForKey(message, "\\wl:ko_pool_ver\\", value, sizeof(value)) &&
-        !std::strcmp(value, "1"))
+        !std::strcmp(value, "2"))
         s_serverAvailable = true;
 }
 
