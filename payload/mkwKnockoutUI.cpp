@@ -167,7 +167,10 @@ void ClearNoticeCache()
 TextHandler* FindText(FinishMessageControl* control)
 {
     [[gnu::longcall]] TextHandler* findText(void*, const char*) AT(0x805E9028);
-    TextHandler* handler = findText(reinterpret_cast<u8*>(control) + 0xA8, "textBox_00");
+    // The finish-message control's text pane is "TextBox_00" (capitalised); the
+    // lookup is case-sensitive, so the wrong case silently returned no handler
+    // and the in-race notice never displayed.
+    TextHandler* handler = findText(reinterpret_cast<u8*>(control) + 0xA8, "TextBox_00");
     return handler && handler->pane == control->text ? handler : nullptr;
 }
 
