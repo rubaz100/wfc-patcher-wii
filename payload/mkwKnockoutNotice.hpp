@@ -6,6 +6,75 @@ namespace wwfc::Knockout
 {
 
 template <typename Char, decltype(sizeof(0)) N>
+bool FormatRaceKnockoutNotice(
+    Char (&output)[N], u8 remaining, u8 total, u8 seriesRound, u8 eliminationCount
+)
+{
+    static_assert(N > 0);
+    output[0] = 0;
+    if (total < 2 || total > 12 || remaining > total || seriesRound < 1 || seriesRound > 12 ||
+        eliminationCount < 1 || eliminationCount > 2)
+        return false;
+    decltype(sizeof(0)) used   = 0;
+    auto                append = [&](const char* text) {
+        while (*text) {
+            if (used + 1 >= N) {
+                output[used] = 0;
+                return false;
+            }
+            output[used++] = static_cast<Char>(*text++);
+        }
+        output[used] = 0;
+        return true;
+    };
+    auto number = [&](u8 value) {
+        char digits[3] = {};
+        if (value >= 10) {
+            digits[0] = '1';
+            digits[1] = '0' + value % 10;
+        } else
+            digits[0] = '0' + value;
+        return append(digits);
+    };
+    return append("Race Knockout - ") && number(remaining) && append(" / ") && number(total) &&
+           append(" in\nSeries race ") && number(seriesRound) &&
+           append(eliminationCount == 2 ? "\nUp to " : "\n") && number(eliminationCount) &&
+           append(" out after this race");
+}
+
+// Keep the camera/controls lines from the copied spectator snapshot, while
+// distinguishing a racer carried as a spectator into another series race.
+template <typename Char, decltype(sizeof(0)) N>
+bool FormatSeriesSpectatorNotice(Char (&output)[N], const Char (&notice)[N])
+{
+    static_assert(N > 0);
+    output[0]                = 0;
+    decltype(sizeof(0)) used = 0;
+    for (const char* text = "Eliminated from series"; *text; ++text) {
+        if (used + 1 >= N) {
+            output[used] = 0;
+            return false;
+        }
+        output[used++] = static_cast<Char>(*text);
+    }
+    output[used]              = 0;
+    decltype(sizeof(0)) start = 0;
+    while (start < N && notice[start] && notice[start] != '\n')
+        ++start;
+    if (start == N)
+        return false;
+    for (; start < N && notice[start]; ++start) {
+        if (used + 1 >= N) {
+            output[used] = 0;
+            return false;
+        }
+        output[used++] = notice[start];
+    }
+    output[used] = 0;
+    return start < N;
+}
+
+template <typename Char, decltype(sizeof(0)) N>
 bool FormatKnockdownRaceNotice(Char (&output)[N], u8 remaining, u8 total, u8 lap)
 {
     static_assert(N > 0);

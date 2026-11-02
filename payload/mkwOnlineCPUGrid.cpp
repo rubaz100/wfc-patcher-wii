@@ -127,7 +127,7 @@ void InitScenario(RaceConfig* scenario, const RaceConfig* previous)
     if (plan.cpuCount)
         scenario->configureOnlineCPUSettings(plan.seed);
     if (plan.knockoutEnabled)
-        scenario->configureOnlineLapCount(total);
+        scenario->configureOnlineLapCount(plan.knockoutMode == 2 ? 3 : total);
     OnGridInitialized();
 }
 

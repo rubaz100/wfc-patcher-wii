@@ -49,6 +49,12 @@ using namespace mkw;
 [[gnu::longcall]] bool NativeCheckOnlineVSProgress(void*) AT(0x8053EFD4);
 [[gnu::longcall]] bool NativeCanOnlineVSRaceEnd(void*) AT(0x8053FA10);
 [[gnu::longcall]] bool NativeIsConnectedToAnyone(NetManager*) AT(0x80656F00);
+[[gnu::longcall]] bool NativeOnlineVSFinishRule(void*, u32, u32) AT(0x8053FB38);
+
+WWFC_DEFINE_CTR_STUB(
+    0x8053EC50, bool NativeFinishGracePeriod(void*), stwu r1, -0x20(r1); mflr r0; lis r4, 0x809C;
+    stw r0, 0x24(r1);
+)
 
 // Original PAL constructors/leaf entry words, before the replacement jump.
 // The relocated constant bases in the player constructor are 0x8089xxxx.
@@ -76,6 +82,10 @@ constinit wchar_t      s_notice[128]        = {};
 constinit u32          s_noticeGeneration   = 0;
 constinit u8           s_gridCount          = 0;
 constinit RaceManager* s_boundRace          = nullptr;
+constinit u32          s_boundEpoch         = 0;
+constinit u16          s_carriedMask        = 0;
+constinit bool         s_carriedSeeded      = false;
+constinit bool         s_raceStarted        = false;
 constinit u32          s_appliedSequence    = 0;
 constinit u16          s_retireEffectMask   = 0;
 constinit u16          s_resultReportedMask = 0;
@@ -98,6 +108,10 @@ void Reset()
     s_notice[0]          = 0;
     s_gridCount          = 0;
     s_boundRace          = nullptr;
+    s_boundEpoch         = 0;
+    s_carriedMask        = 0;
+    s_carriedSeeded      = false;
+    s_raceStarted        = false;
     s_appliedSequence    = 0;
     s_retireEffectMask   = 0;
     s_resultReportedMask = 0;
@@ -172,6 +186,16 @@ void CheckOnlineVSStalling(void* mode)
     NativeCheckOnlineVSProgress(mode);
 }
 
+bool FinishGracePeriod(void* mode)
+{
+    auto* race    = RaceManager::Instance();
+    auto* configs = RaceConfigManager::Instance();
+    if (OnlineCPU::RaceKnockoutEnabled() && !OnlineCPU::KnockoutRoundCommitted() && race &&
+        configs && IsLocalSpectator(*race, configs->getConfig()))
+        return false;
+    return NativeFinishGracePeriod(mode);
+}
+
 u32 Milliseconds(const mkw::Time& time)
 {
     return time.m_minutes * 60000u + time.m_seconds * 1000u + time.m_milliseconds;
@@ -182,6 +206,8 @@ RaceManager::Player* ConstructRacePlayer(RaceManager::Player* player, u32 id, u3
     const u8 laps = ContinuousLapCount();
     if (laps)
         nativeLaps = laps;
+    else if (OnlineCPU::RaceKnockoutEnabled())
+        nativeLaps = 3;
     auto* configs = RaceConfigManager::Instance();
     if (configs && configs->getConfig().isWifiVSRace())
         // Native scenario Init can retain the previous KO lap byte. Match
@@ -195,12 +221,16 @@ RaceManager::Player* ConstructRacePlayer(RaceManager::Player* player, u32 id, u3
 
 u32 LapCount()
 {
+    if (OnlineCPU::RaceKnockoutEnabled())
+        return 3;
     const u8 laps = ContinuousLapCount();
     return laps ? laps : NativeLapCount();
 }
 
 u32 EndLapLimit(u32 nativeLaps)
 {
+    if (OnlineCPU::RaceKnockoutEnabled())
+        return 3;
     const u8 laps = ContinuousLapCount();
     return laps ? laps : nativeLaps;
 }
@@ -237,12 +267,14 @@ bool RaceFrameBudgetExpired()
 
 bool CanOnlineVSRaceEnd(void* mode)
 {
-    const auto* race    = RaceManager::Instance();
-    auto*       network = NetManager::Instance();
-    if (ContinuousLapCount() && race && race->m_state == RaceManager::EState::RACE &&
+    const auto* race          = RaceManager::Instance();
+    auto*       network       = NetManager::Instance();
+    const bool awaitingCommit = OnlineCPU::RaceKnockoutEnabled()
+                                    ? !OnlineCPU::KnockoutRoundCommitted()
+                                    : ContinuousLapCount() && OnlineCPU::KnockoutWinnerId() == 0xFF;
+    if (awaitingCommit && race && race->m_state == RaceManager::EState::RACE &&
         OnlineCPU::OwnerAlive() && network && NativeIsConnectedToAnyone(network) && race->m_timer &&
-        Milliseconds(race->m_timer->m_time[0]) <= RaceTimeBudget() && !RaceFrameBudgetExpired() &&
-        OnlineCPU::KnockoutWinnerId() == 0xFF)
+        Milliseconds(race->m_timer->m_time[0]) <= RaceTimeBudget() && !RaceFrameBudgetExpired())
         return false;
     return NativeCanOnlineVSRaceEnd(mode);
 }
@@ -350,7 +382,7 @@ bool ApplyRetirementEffect(RaceManager& race, u8 id)
     return didRetire;
 }
 
-bool ApplyElimination(RaceManager& race, u8 id, u8 placement)
+bool ApplyElimination(RaceManager& race, u8 id, u8 placement, bool queueNotice = true)
 {
     // Record/consume the agreed event independently of transient kart readiness.
     // Retrying its native effect must not block subsequent ordered decisions.
@@ -368,7 +400,7 @@ bool ApplyElimination(RaceManager& race, u8 id, u8 placement)
         if (FormatEliminationNotice(notice, placement)) {
             PublishNotice(notice);
             wchar_t result[128];
-            if (FormatEliminationNotice(result, placement, false)) {
+            if (queueNotice && FormatEliminationNotice(result, placement, false)) {
                 UI::WifiMenuPage::QueueNotice(result);
             }
         }
@@ -475,6 +507,42 @@ void FollowSurvivor(RaceManager& race, RaceConfig& config, const Snapshot& snaps
     UpdateSpectatorNotice(number, cpu);
 }
 
+void FinalizeCourseDNFSurvivors(RaceManager& race, const Snapshot& snapshot)
+{
+    const auto* plan  = OnlineCPU::CurrentPlan();
+    const u32   stage = static_cast<u32>(race.m_state);
+    const u32   base  = OnlineCPU::KnockoutFinalBase();
+    if (!OnlineCPU::RaceKnockoutEnabled() || !OnlineCPU::KnockoutRoundCommitted() ||
+        &race != s_boundRace || !plan || plan->epoch != s_boundEpoch ||
+        snapshot.playerCount != s_gridCount || stage < 2 || stage > 4 || !race.m_timer || !base ||
+        base >= 63u * 60000u)
+        return;
+    const u16 dnf         = OnlineCPU::KnockoutCourseDNFMask() & ~s_raceState.eliminatedMask() &
+                            ~snapshot.disconnectedMask;
+    auto      finish      = race.m_timer->m_time[0];
+    finish.m_minutes      = base / 60000;
+    finish.m_seconds      = (base / 1000) % 60;
+    finish.m_milliseconds = base % 1000;
+    finish.m_valid        = true;
+    for (u8 id = 0; id < snapshot.playerCount; ++id) {
+        auto* player = race.m_players[id];
+        if (!(dnf & (1u << id)) || !player || !player->m_raceFinishTime)
+            continue;
+        // Native DNF times use minute 99, which cannot be carried by an
+        // online finished frame. F supplies the same valid replacement on
+        // every peer, including guests that never received a finished frame.
+        // Eliminated DNF racers retain their series placement time below.
+        if (player->m_stateFlags & RaceManager::Player::FLAG_FINISHED) {
+            player->m_raceFinishTime->m_minutes      = finish.m_minutes;
+            player->m_raceFinishTime->m_seconds      = finish.m_seconds;
+            player->m_raceFinishTime->m_milliseconds = finish.m_milliseconds;
+            player->m_raceFinishTime->m_valid        = true;
+        } else {
+            player->endRace(finish);
+        }
+    }
+}
+
 void FinalizeRetired(RaceManager& race, const Snapshot& snapshot)
 {
     const u16  survivors = ((1u << snapshot.playerCount) - 1) &
@@ -533,6 +601,23 @@ void ApplyCanonicalWinner(RaceManager& race, const Snapshot& snapshot)
     finish.m_valid        = true;
     player->endRace(finish);
 }
+
+void FinishCommittedCourse(RaceManager& race, const Snapshot& snapshot)
+{
+    if (!OnlineCPU::RaceKnockoutEnabled() || !OnlineCPU::KnockoutRoundCommitted() ||
+        &race != s_boundRace || race.m_state != RaceManager::EState::RACE || !race.m_timer ||
+        !race.m_timer->m_time[0].m_valid || !Milliseconds(race.m_timer->m_time[0]) ||
+        !OnlineCPU::KnockoutFinalBase() || !s_raceState.racersResolved(snapshot, 0))
+        return;
+    auto* mode = reinterpret_cast<void**>(&race)[0x10 / sizeof(void*)];
+    // Every natural EndPlayerRace already ran its counter/input bookkeeping.
+    // The first course can have no parked karts left to finish after F arrives.
+    // Reproduce only native 80533D1C..80533D68's final CanRaceEnd/vf24 success
+    // branch: for a fully resolved grid vf24 has no local-player side effects.
+    if (mode && NativeCanOnlineVSRaceEnd(mode) &&
+        NativeOnlineVSFinishRule(mode, snapshot.playerCount, snapshot.playerCount))
+        race.m_state = RaceManager::EState::FINISHED;
+}
 #  endif
 
 } // namespace
@@ -563,7 +648,7 @@ u8 ContinuousLapCount()
 #  if WWFC_KNOCKOUT_APPLY
     auto*       configs = RaceConfigManager::Instance();
     const auto* plan    = OnlineCPU::CurrentPlan();
-    if (!configs || !plan || !IsSpectatorTestRoom())
+    if (!configs || !plan || !IsSpectatorTestRoom() || OnlineCPU::RaceKnockoutEnabled())
         return 0;
     const u8 count = configs->getConfig().playerCount();
     return count >= 2 && count <= MAX_PLAYERS && count == plan->humanCount + plan->cpuCount ? count
@@ -579,9 +664,12 @@ bool ContinuousRaceInfo(u8& remaining, u8& total, u8& winner)
     total     = 0;
     winner    = 0xFF;
 #  if WWFC_KNOCKOUT_APPLY
-    auto*    race  = RaceManager::Instance();
-    const u8 count = ContinuousLapCount();
-    if (!race || race != s_boundRace || !count || count != s_gridCount)
+    auto*    race    = RaceManager::Instance();
+    auto*    configs = RaceConfigManager::Instance();
+    const u8 count   = configs ? configs->getConfig().playerCount() : 0;
+    if (!IsSpectatorTestRoom() || !race || race != s_boundRace || !count || count != s_gridCount)
+        return false;
+    if (OnlineCPU::RaceKnockoutEnabled() && !s_carriedSeeded)
         return false;
     Snapshot snapshot = {};
     if (!ReadSnapshot(*race, count, snapshot))
@@ -686,7 +774,18 @@ void Tick()
         Reset();
         return;
     }
-    if (race->m_state != RaceManager::EState::RACE) {
+    bool beforeRace = false;
+    bool afterRace  = false;
+    u32  epoch      = 0;
+#  if WWFC_KNOCKOUT_APPLY
+    const bool  raceMode = OnlineCPU::RaceKnockoutEnabled();
+    const auto* plan     = OnlineCPU::CurrentPlan();
+    epoch                = plan ? plan->epoch : 0;
+    beforeRace           = raceMode && static_cast<u32>(race->m_state) < 2;
+    afterRace =
+        raceMode && static_cast<u32>(race->m_state) >= 3 && static_cast<u32>(race->m_state) <= 4;
+#  endif
+    if (race->m_state != RaceManager::EState::RACE && !beforeRace && !afterRace) {
         // Native EndPlayerRace can enter finishing stage 3 inside retirement
         // finalization. Preserve placements/times through stages 3/4 so the
         // finish-time hook and results handshake still have their KO state.
@@ -697,10 +796,11 @@ void Tick()
         Reset();
         return;
     }
-    if (s_boundRace != race || s_gridCount != count) {
+    if (s_boundRace != race || s_gridCount != count || s_boundEpoch != epoch) {
         Reset();
-        s_boundRace = race;
-        s_gridCount = count;
+        s_boundRace  = race;
+        s_gridCount  = count;
+        s_boundEpoch = epoch;
     }
     if (race->m_players == nullptr || race->m_playerIdInEachPosition == nullptr) {
         return;
@@ -726,6 +826,35 @@ void Tick()
 #  if WWFC_KNOCKOUT_APPLY
     if (IsSpectatorTestRoom()) {
         s_raceState.bind(count);
+        if (raceMode && !s_carriedSeeded) {
+            if (!OnlineCPU::RaceKnockoutRosterReady())
+                return;
+            u16 mask = 0, places = 0;
+            for (u8 id = 0; id < count; ++id) {
+                const u8 placement = OnlineCPU::InitialKnockoutPlacement(id);
+                if (!placement)
+                    continue;
+                if (placement < 2 || placement > count || (places & (1u << placement)))
+                    return;
+                mask |= 1u << id;
+                places |= 1u << placement;
+            }
+            if (mask != OnlineCPU::InitialKnockoutMask() || mask == (1u << count) - 1)
+                return;
+            s_carriedMask = mask;
+            for (u8 id = 0; id < count; ++id) {
+                const u8 placement = OnlineCPU::InitialKnockoutPlacement(id);
+                if (placement && !ApplyElimination(*race, id, placement, false))
+                    return;
+            }
+            s_carriedSeeded = true;
+        }
+        if (!beforeRace && !s_raceStarted) {
+            // Native kart/countdown initialization may reset the stop effect.
+            // Reapply carried retirements once at the first racing frame.
+            s_retireEffectMask &= ~s_carriedMask;
+            s_raceStarted = true;
+        }
         OnlineCPU::KnockoutEvent event;
         while (OnlineCPU::ReadKnockoutEvent(s_appliedSequence, event)) {
             if (event.playerId >= count ||
@@ -743,7 +872,33 @@ void Tick()
                 ApplyRetirementEffect(*race, id))
                 s_retireEffectMask |= 1u << id;
         }
+        if (beforeRace)
+            return;
         FollowSurvivor(*race, scenario, snapshot);
+        if (raceMode) {
+            // Race Knockout resolves only after the entire active field has
+            // finished or disconnected. Carried spectators never count as
+            // unfinished contenders or as this course's new victims.
+            if (race->m_timer && s_raceState.racersResolved(snapshot, s_carriedMask) &&
+                !OnlineCPU::KnockoutRoundCommitted()) {
+                if (OnlineCPU::IsOwner() && OnlineCPU::OwnerAlive()) {
+                    const u32 base = OwnerFinalBase(*race, snapshot);
+                    if (base)
+                        OnlineCPU::PublishRaceKnockoutResult(base);
+                } else if (OnlineCPU::OwnerAlive()) {
+                    OnlineCPU::RequestRaceKnockoutCommit();
+                }
+            }
+            if (OnlineCPU::KnockoutRoundCommitted()) {
+                FinalizeCourseDNFSurvivors(*race, snapshot);
+                if (!ReadSnapshot(*race, count, snapshot))
+                    return;
+                FinalizeRetired(*race, snapshot);
+                if (ReadSnapshot(*race, count, snapshot))
+                    FinishCommittedCourse(*race, snapshot);
+            }
+            return;
+        }
         const u8 survivor = s_raceState.soleSurvivor(snapshot);
         if (race->m_timer && survivor < count && OnlineCPU::IsOwner() && OnlineCPU::OwnerAlive() &&
             !OnlineCPU::KnockoutFinalBase() && !OnlineCPU::KnockoutDecisionPending()) {
@@ -790,6 +945,9 @@ void Tick()
 WWFC_DEFINE_PATCH = Patch::BranchWithCTR(WWFC_PATCH_LEVEL_FEATURE, 0x80533ED8, ConstructRacePlayer);
 WWFC_DEFINE_PATCH = Patch::BranchWithCTR(WWFC_PATCH_LEVEL_FEATURE, 0x805349B8, EndLap);
 WWFC_DEFINE_PATCH = Patch::BranchWithCTR(WWFC_PATCH_LEVEL_FEATURE, 0x805336A4, LapCount);
+// A carried spectator intentionally stays unfinished until the course commit;
+// do not turn it into a 30-second DNF while active entrants are still racing.
+WWFC_DEFINE_PATCH = Patch::BranchWithCTR(WWFC_PATCH_LEVEL_FEATURE, 0x8053EC40, FinishGracePeriod);
 // GMDataOnlineVS::CanRaceEnd, including its no-network-peer early return.
 // A committed KO winner owns completion while the authority is still alive.
 WWFC_DEFINE_PATCH = Patch::WritePointer(WWFC_PATCH_LEVEL_FEATURE, 0x808B3930, CanOnlineVSRaceEnd);

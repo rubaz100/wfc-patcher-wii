@@ -25,6 +25,10 @@ struct Plan {
     u8   humanCount;
     u8   cpuCount;
     bool knockoutEnabled;
+    u8   knockoutMode; // 0 normal VS, 1 Round Knockdown, 2 Race Knockout.
+    u8   knockoutEliminationCount;
+    u32  seriesId;
+    u8   seriesRound;
 };
 
 // Owner decisions are relayed by the authenticated server in a bounded ordered
@@ -38,6 +42,14 @@ struct KnockoutEvent {
 };
 
 bool KnockoutEnabled();
+bool RaceKnockoutEnabled();
+bool RaceKnockoutRosterReady();
+u8   InitialKnockoutPlacement(u8 playerId);
+u16  InitialKnockoutMask();
+bool KnockoutRoundCommitted();
+u16  KnockoutCourseDNFMask();
+bool PublishRaceKnockoutResult(u32 baseMilliseconds);
+void RequestRaceKnockoutCommit();
 bool KnockoutDecisionPending();
 u32  KnockoutFinalBase();
 u8   KnockoutWinnerId();

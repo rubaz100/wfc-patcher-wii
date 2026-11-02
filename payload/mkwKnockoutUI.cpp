@@ -7,6 +7,8 @@
 #  include "import/mkw/ui/FormatParam.hpp"
 #  include "mkwKnockout.hpp"
 #  include "mkwKnockoutNotice.hpp"
+#  include "mkwOnlineCPU.hpp"
+#  include "wwfcLibC.hpp"
 #  include "wwfcPatch.hpp"
 
 namespace wwfc::Knockout
@@ -73,8 +75,15 @@ constinit u32                   s_lastNativeMessageId  = 0;
 
 bool CopyRaceNotice(u8 slot, wchar_t (&output)[128], u32& generation)
 {
-    if (CopyEliminationNotice(slot, output, generation))
+    if (CopyEliminationNotice(slot, output, generation)) {
+        if (OnlineCPU::RaceKnockoutEnabled()) {
+            wchar_t spectator[128];
+            std::memcpy(spectator, output, sizeof(spectator));
+            generation ^= 0x40000000u;
+            return FormatSeriesSpectatorNotice(output, spectator);
+        }
         return true;
+    }
     u8    remaining, total, winner;
     auto* race    = mkw::RaceManager::Instance();
     auto* configs = mkw::RaceConfigManager::Instance();
@@ -87,7 +96,21 @@ bool CopyRaceNotice(u8 slot, wchar_t (&output)[128], u32& generation)
             mkw::RaceConfigPlayer::EPlayerType::MASTER)
             continue;
         const auto* player = race->m_players[id];
-        if (!player || player->m_id != id || player->m_currentLap > total)
+        if (!player || player->m_id != id ||
+            (player->m_stateFlags & (mkw::RaceManager::Player::FLAG_FINISHED |
+                                     mkw::RaceManager::Player::FLAG_DISCONNECTED)))
+            return false;
+        if (OnlineCPU::RaceKnockoutEnabled()) {
+            const auto* plan = OnlineCPU::CurrentPlan();
+            if (!plan)
+                return false;
+            generation = 0xC0000000u | (remaining << 16) | (plan->seriesRound << 8) |
+                         (plan->knockoutEliminationCount << 4) | total;
+            return FormatRaceKnockoutNotice(
+                output, remaining, total, plan->seriesRound, plan->knockoutEliminationCount
+            );
+        }
+        if (player->m_currentLap > total)
             return false;
         const u8 lap = static_cast<u8>(player->m_currentLap);
         generation   = 0x80000000u | (remaining << 16) | (lap << 8) | total;

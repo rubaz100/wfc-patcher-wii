@@ -1,4 +1,12 @@
-# Current integration: 0.3.12 / CPU protocol 3 / rules 2
+# Current integration: 0.3.13 / CPU protocol 3 / rules 3
+
+Race Knockout is a second web-selected mode: normal course completion, then
+last1/2 active finishers leave the series. Human PID/CPU ordinal placements
+carry through next course as parked spectators; Round Knockdown is unchanged.
+Native healthy completion waits for server course commit. A new audited
+8053EC40 entry protects parked spectators from the30-second cutoff; final
+all-resolved completion reproduces the exact native CanEnd/vf24/state3 branch
+without double player counters. No tests/races; see root release0.3.13 notes.
 
 Continuous Knockdown allocates a native lap bound for all2–12 racers and
 eliminates once per leader-lap boundary until a canonical winner event arrives.

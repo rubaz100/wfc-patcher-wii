@@ -123,7 +123,7 @@ void SendExtendedLogin(
 
 #if RMC && WWFC_ONLINE_CPU_APPLY && WWFC_KNOCKOUT_APPLY && RMCPD00
     GameSpy::gpiAppendStringToBuffer(
-        connection, outputBuffer, "\\wl:cpu_ver\\3\\wl:ko_pool_ver\\2"
+        connection, outputBuffer, "\\wl:cpu_ver\\3\\wl:ko_pool_ver\\3"
     );
 #endif
 

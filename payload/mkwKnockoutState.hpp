@@ -145,6 +145,15 @@ public:
         return survivors != 0 && (snapshot.finishedMask & survivors) == survivors;
     }
 
+    bool racersResolved(const Snapshot& snapshot, u16 excludedMask) const
+    {
+        if (snapshot.playerCount != m_playerCount || m_playerCount < 2 ||
+            m_playerCount > MAX_PLAYERS)
+            return false;
+        const u16 racers = ((1u << m_playerCount) - 1) & ~excludedMask;
+        return racers && ((snapshot.finishedMask | snapshot.disconnectedMask) & racers) == racers;
+    }
+
     u16 survivingMask(const Snapshot& snapshot) const
     {
         if (snapshot.playerCount != m_playerCount || m_playerCount < 2 ||

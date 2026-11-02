@@ -10,6 +10,7 @@
 #  if WWFC_ONLINE_CPU_APPLY
 #    include "import/dwc.h"
 #    include "import/gamespy.h"
+#    include "import/mkw/net/NetManager.hpp"
 #    include "import/mkw/system/RaceConfig.hpp"
 #    include "import/mkw/system/RaceManager.hpp"
 #    include "import/mkw/system/System.hpp"
@@ -46,8 +47,74 @@ constinit u8            s_knockoutCount                        = 0;
 constinit u32           s_knockoutFinalBase                    = 0;
 constinit u8            s_knockoutWinnerId                     = 0xff;
 constinit u16           s_knockoutFinalDisconnected            = 0;
+constinit u16           s_courseDNF                            = 0;
 constinit u8            s_pendingKnockout[KNOCKOUT_EVENT_SIZE] = {};
 constinit u32           s_lastKnockoutSend                     = 0;
+constinit bool          s_tournamentReady                      = false;
+constinit u8            s_carriedCPU[12] = {}, s_carriedHumanPlace[12] = {};
+constinit u32           s_carriedHumanPID[12] = {}, s_racerPID[12] = {};
+constinit u8            s_racerLocal[12]                  = {};
+constinit u8            s_carriedHumanCount               = 0;
+constexpr u32           COURSE_RESULT_MAX                 = 12 + 12 * 16;
+constinit u8            s_courseResult[COURSE_RESULT_MAX] = {};
+constinit u32           s_courseResultLength = 0, s_lastCourseSend = 0;
+
+bool RaceScene();
+
+void ResetTournament()
+{
+    s_tournamentReady    = false;
+    s_carriedHumanCount  = 0;
+    s_courseResultLength = 0;
+    std::memset(s_carriedCPU, 0, sizeof(s_carriedCPU));
+    std::memset(s_carriedHumanPID, 0, sizeof(s_carriedHumanPID));
+    std::memset(s_carriedHumanPlace, 0, sizeof(s_carriedHumanPlace));
+    std::memset(s_racerPID, 0, sizeof(s_racerPID));
+    std::memset(s_racerLocal, 0, sizeof(s_racerLocal));
+}
+
+bool CacheRacerIdentity(u8 id)
+{
+    const auto* plan    = CurrentPlan();
+    auto*       network = mkw::NetManager::Instance();
+    if (!plan || id >= plan->humanCount || !network)
+        return false;
+    if (s_racerPID[id])
+        return true;
+    const auto* race    = mkw::RaceManager::Instance();
+    auto*       configs = mkw::RaceConfigManager::Instance();
+    if (!RaceScene() || !race || !configs || !race->m_players ||
+        configs->getConfig().playerCount() != plan->humanCount + plan->cpuCount ||
+        static_cast<u32>(race->m_state) > 2)
+        return false;
+    // Do not cache a previous course's native ID/AID map during allocation.
+    for (u8 human = 0; human < plan->humanCount; ++human)
+        if (!race->m_players[human] || race->m_players[human]->m_id != human)
+            return false;
+    const auto* aids = reinterpret_cast<const u8*>(network) + 0x2920;
+    const u8    aid  = aids[id];
+    if (aid >= MAX_PLAYERS)
+        return false;
+    u32 pid = 0;
+    if (aid == network->myAid()) {
+        const auto* user = DWC::DWCi_GetUserData();
+        if (user)
+            pid = user->profileId;
+    } else if (network->availableAids() & (1u << aid)) {
+        const auto* node = DWC::DWCi_NodeInfoList_GetNodeInfoForAid(aid);
+        if (node)
+            pid = node->profileId;
+    }
+    u8 local = 0;
+    for (u8 previous = 0; previous < id; ++previous)
+        if (aids[previous] == aid)
+            ++local;
+    if (!pid || local != 0)
+        return false; // KO supports one local human.
+    s_racerPID[id]   = pid;
+    s_racerLocal[id] = local;
+    return true;
+}
 
 void ResetItemStates()
 {
@@ -64,6 +131,7 @@ void ResetKnockoutEvents()
     s_knockoutFinalBase         = 0;
     s_knockoutWinnerId          = 0xff;
     s_knockoutFinalDisconnected = 0;
+    s_courseDNF                 = 0;
     std::memset(s_pendingKnockout, 0, sizeof(s_pendingKnockout));
 }
 
@@ -130,7 +198,7 @@ void Message(const char* text)
     case 'P':
         if (text[7] != ':' || !s_waiting || !Wire::Number(p, a, ':') || !Wire::Number(p, b, ':') ||
             !Wire::Number(p, c, ':') || !Wire::Number(p, d, ':') || !Wire::Number(p, e, ':') ||
-            !Wire::Number(p, f, '\0') || f > 1 || !a || !b || c == 0 || c > 12 || d > 11 ||
+            !Wire::Number(p, f, '\0') || f > 2 || !a || !b || c == 0 || c > 12 || d > 11 ||
             c + d > 12)
             break;
         if (s_pending.epoch && a != s_pending.epoch && !Wire::Newer(a, s_pending.epoch))
@@ -141,13 +209,94 @@ void Message(const char* text)
             s_committed  = false;
             ResetKnockoutEvents();
             ResetItemStates();
+            ResetTournament();
         }
-        s_pending     = { a, b, e, static_cast<u8>(c), static_cast<u8>(d), f != 0 };
+        s_pending.epoch           = a;
+        s_pending.ownerProfileId  = b;
+        s_pending.seed            = e;
+        s_pending.humanCount      = static_cast<u8>(c);
+        s_pending.cpuCount        = static_cast<u8>(d);
+        s_pending.knockoutEnabled = f != 0;
+        s_pending.knockoutMode    = static_cast<u8>(f);
+        if (f != 2) {
+            s_pending.knockoutEliminationCount = 1;
+            s_pending.seriesId                 = 0;
+            s_pending.seriesRound              = 0;
+        }
         s_lastAckTick = s_ticks;
+        if (f != 2 || s_tournamentReady)
+            GPReport::ReportU32("wl:cpu_ack", a);
+        break;
+    case 'T': {
+        if (text[7] != ':' || !s_waiting || s_pending.knockoutMode != 2 ||
+            !Wire::Number(p, a, ':') || a != s_pending.epoch || !Wire::Number(p, b, ':') || !b ||
+            !Wire::Number(p, c, ':') || c < 1 || c > 12 || !Wire::Number(p, d, ':') || d < 1 ||
+            d > 2)
+            break;
+        u8       cpus[12] = {}, places[12] = {};
+        u32      humans[12] = {};
+        const u8 total      = s_pending.humanCount + s_pending.cpuCount;
+        u16      seenPlaces = 0;
+        bool     valid      = true;
+        for (u8 i = 0; i < s_pending.cpuCount; ++i) {
+            if (!Wire::Number(p, e, i + 1 == s_pending.cpuCount ? ':' : ',') || e > total ||
+                e == 1 || (e && (seenPlaces & (1u << (e - 1))))) {
+                valid = false;
+                break;
+            }
+            cpus[i] = static_cast<u8>(e);
+            if (e)
+                seenPlaces |= 1u << (e - 1);
+        }
+        if (!valid)
+            break;
+        if (!s_pending.cpuCount && (!Wire::Number(p, e, ':') || e != 0))
+            break;
+        u8 count = 0;
+        if (!(p[0] == '0' && p[1] == '\0')) {
+            for (;;) {
+                if (count >= s_pending.humanCount || !Wire::Number(p, e, '.') || !e) {
+                    valid = false;
+                    break;
+                }
+                const char* end = p;
+                while (*end && *end != ',')
+                    ++end;
+                const char separator = *end;
+                if (!Wire::Number(p, f, separator) || f < 2 || f > total ||
+                    (seenPlaces & (1u << (f - 1)))) {
+                    valid = false;
+                    break;
+                }
+                for (u8 i = 0; i < count; ++i)
+                    if (humans[i] == e)
+                        valid = false;
+                if (!valid)
+                    break;
+                humans[count]   = e;
+                places[count++] = static_cast<u8>(f);
+                seenPlaces |= 1u << (f - 1);
+                if (!separator)
+                    break;
+            }
+        }
+        if (!valid)
+            break;
+        std::memcpy(s_carriedCPU, cpus, sizeof(cpus));
+        std::memcpy(s_carriedHumanPID, humans, sizeof(humans));
+        std::memcpy(s_carriedHumanPlace, places, sizeof(places));
+        s_carriedHumanCount                = count;
+        s_pending.seriesId                 = b;
+        s_pending.seriesRound              = static_cast<u8>(c);
+        s_pending.knockoutEliminationCount = static_cast<u8>(d);
+        s_tournamentReady                  = true;
+        s_lastAckTick                      = s_ticks;
         GPReport::ReportU32("wl:cpu_ack", a);
         break;
+    }
     case 'C':
-        if (text[7] == ':' && s_waiting && Wire::Number(p, a, '\0') && s_pending.epoch == a) {
+        if (text[7] == ':' && s_waiting && Wire::Number(p, a, '\0') && s_pending.epoch == a &&
+            (s_pending.knockoutMode != 2 || s_tournamentReady)) {
             s_committed     = true;
             s_alive         = true;
             s_lastOwnerTick = s_ticks;
@@ -209,24 +358,28 @@ void Message(const char* text)
             Wire::Read32(bytes) != plan.epoch || s_knockoutFinalBase ||
             Wire::Read32(bytes + 4) != s_knockoutCount + 1u || bytes[15])
             break;
-        const u16 previousMask =
-            s_knockoutCount ? s_knockoutEvents[s_knockoutCount - 1].eliminatedMask : 0;
-        const u16 lap = Wire::Read16(bytes + 8);
+        const u16 previousMask = s_knockoutCount
+                                     ? s_knockoutEvents[s_knockoutCount - 1].eliminatedMask
+                                     : InitialKnockoutMask();
+        const u16 lap          = Wire::Read16(bytes + 8);
         const u8  id = bytes[10], place = bytes[11], kind = bytes[14];
         const u8  total        = plan.humanCount + plan.cpuCount;
         const u32 base         = Wire::Read32(bytes + 16);
         const u32 disconnected = Wire::Read32(bytes + 20);
         if (kind == 1) {
-            if (disconnected || !previousMask || lap || id != 0xff || place ||
+            if ((plan.knockoutMode != 2 && disconnected) || (disconnected & ~((1u << total) - 1)) ||
+                !previousMask || lap || id != 0xff || place ||
                 Wire::Read16(bytes + 12) != previousMask || !base ||
                 base > 63u * 60000u - 1 - MAX_PLAYERS * 10u)
                 break;
             s_knockoutFinalBase = base;
+            s_courseDNF         = static_cast<u16>(disconnected);
         } else if (kind == 2) {
             const u32 grid = (1u << total) - 1;
-            if (lap || id >= total || place != 1 || Wire::Read16(bytes + 12) != previousMask ||
-                (disconnected & ~grid) || (grid & ~(previousMask | disconnected)) != (1u << id) ||
-                !base || base > 63u * 60000u - 1 - MAX_PLAYERS * 10u)
+            if (plan.knockoutMode == 2 || lap || id >= total || place != 1 ||
+                Wire::Read16(bytes + 12) != previousMask || (disconnected & ~grid) ||
+                (grid & ~(previousMask | disconnected)) != (1u << id) || !base ||
+                base > 63u * 60000u - 1 - MAX_PLAYERS * 10u)
                 break;
             s_knockoutFinalBase         = base;
             s_knockoutWinnerId          = id;
@@ -299,7 +452,7 @@ void Buddy(void* connection, const BuddyMessage* argument, void* param)
                 Message(text);
                 return;
             }
-            if (!std::strncmp(text, "LKD2:", 5)) {
+            if (!std::strncmp(text, "LKD3:", 5)) {
                 Knockdown::HandleServerMessage(text);
                 return;
             }
@@ -319,6 +472,128 @@ const Plan* CurrentPlan()
 bool KnockoutEnabled()
 {
     return s_committed && s_allocated && s_active.knockoutEnabled;
+}
+
+bool RaceKnockoutEnabled()
+{
+    return KnockoutEnabled() && s_active.knockoutMode == 2 && s_tournamentReady;
+}
+
+bool RaceKnockoutRosterReady()
+{
+    const auto* plan = CurrentPlan();
+    if (!plan || plan->knockoutMode != 2 || !s_tournamentReady)
+        return false;
+    for (u8 id = 0; id < plan->humanCount; ++id)
+        if (!CacheRacerIdentity(id))
+            return false;
+    return true;
+}
+
+u8 InitialKnockoutPlacement(u8 id)
+{
+    const auto* plan = CurrentPlan();
+    if (!plan || plan->knockoutMode != 2 || !s_tournamentReady ||
+        id >= plan->humanCount + plan->cpuCount)
+        return 0;
+    if (id >= plan->humanCount)
+        return s_carriedCPU[id - plan->humanCount];
+    if (!CacheRacerIdentity(id))
+        return 0;
+    for (u8 i = 0; i < s_carriedHumanCount; ++i)
+        if (s_carriedHumanPID[i] == s_racerPID[id])
+            return s_carriedHumanPlace[i];
+    return 0;
+}
+
+u16 InitialKnockoutMask()
+{
+    const auto* plan = CurrentPlan();
+    if (!plan || plan->knockoutMode != 2)
+        return 0;
+    u16 mask = 0;
+    for (u8 id = 0; id < plan->humanCount + plan->cpuCount; ++id)
+        if (InitialKnockoutPlacement(id))
+            mask |= 1u << id;
+    return mask;
+}
+
+bool KnockoutRoundCommitted()
+{
+    return RaceKnockoutEnabled() && s_knockoutFinalBase != 0;
+}
+
+u16 KnockoutCourseDNFMask()
+{
+    return KnockoutRoundCommitted() ? s_courseDNF : 0;
+}
+
+void RequestRaceKnockoutCommit()
+{
+    if (!RaceKnockoutEnabled() || KnockoutRoundCommitted() || s_ticks - s_lastCourseSend < 60)
+        return;
+    s_lastCourseSend = s_ticks;
+    GPReport::ReportU32("wl:cpu_plan", s_active.epoch);
+}
+
+bool PublishRaceKnockoutResult(u32 base)
+{
+    if (!RaceKnockoutEnabled() || !IsOwner() || !OwnerAlive() || KnockoutRoundCommitted() ||
+        !RaceKnockoutRosterReady() || !base || base > 63u * 60000u - 1 - MAX_PLAYERS * 10u)
+        return false;
+    if (!s_courseResultLength) {
+        const auto* race = mkw::RaceManager::Instance();
+        if (!race || !race->m_players)
+            return false;
+        const u8 total                    = s_active.humanCount + s_active.cpuCount;
+        u8       bytes[COURSE_RESULT_MAX] = {};
+        Wire::Write32(bytes, s_active.epoch);
+        Wire::Write32(bytes + 4, base);
+        bytes[8] = total;
+        for (u8 id = 0; id < total; ++id) {
+            const auto* player = race->m_players[id];
+            if (!player || player->m_id != id)
+                return false;
+            u8* row = bytes + 12 + id * 16;
+            row[0]  = id;
+            if (id >= s_active.humanCount) {
+                row[1] = 1;
+                row[2] = id - s_active.humanCount;
+            } else {
+                row[2] = s_racerLocal[id];
+                Wire::Write32(row + 4, s_racerPID[id]);
+            }
+            if (InitialKnockoutPlacement(id))
+                continue;
+            const auto* time = player->m_raceFinishTime;
+            if (player->m_stateFlags & mkw::RaceManager::Player::FLAG_DISCONNECTED)
+                row[3] = 2;
+            else if (!(player->m_stateFlags & mkw::RaceManager::Player::FLAG_FINISHED))
+                return false;
+            else if (
+                time && time->m_valid && time->m_minutes < 63 && time->m_seconds < 60 &&
+                time->m_milliseconds < 1000
+            ) {
+                const u32 ms =
+                    time->m_minutes * 60000u + time->m_seconds * 1000u + time->m_milliseconds;
+                if (ms) {
+                    row[3] = 1;
+                    Wire::Write32(row + 8, ms);
+                } else
+                    row[3] = 4;
+            } else
+                row[3] = 4;
+        }
+        s_courseResultLength = 12 + total * 16;
+        std::memcpy(s_courseResult, bytes, s_courseResultLength);
+        // First delivery is immediate; retries retain this exact decision input.
+        s_lastCourseSend = s_ticks - 60;
+    }
+    if (s_ticks - s_lastCourseSend >= 60) {
+        s_lastCourseSend = s_ticks;
+        GPReport::ReportB64Encode("wl:ko_course", s_courseResult, s_courseResultLength);
+    }
+    return true;
 }
 
 bool KnockoutDecisionPending()
@@ -344,11 +619,13 @@ u16 KnockoutFinalDisconnectedMask()
 bool PublishKnockoutWinner(u32 base, u8 winner, u16 disconnected)
 {
     const auto* plan = CurrentPlan();
-    if (!KnockoutEnabled() || !IsOwner() || !OwnerAlive() || KnockoutDecisionPending() ||
-        s_knockoutFinalBase || !plan || winner >= plan->humanCount + plan->cpuCount || !base ||
+    if (!KnockoutEnabled() || RaceKnockoutEnabled() || !IsOwner() || !OwnerAlive() ||
+        KnockoutDecisionPending() || s_knockoutFinalBase || !plan ||
+        winner >= plan->humanCount + plan->cpuCount || !base ||
         base > 63u * 60000u - 1 - MAX_PLAYERS * 10u)
         return false;
-    const u16 mask = s_knockoutCount ? s_knockoutEvents[s_knockoutCount - 1].eliminatedMask : 0;
+    const u16 mask = s_knockoutCount ? s_knockoutEvents[s_knockoutCount - 1].eliminatedMask
+                                     : InitialKnockoutMask();
     const u16 grid = (1u << (plan->humanCount + plan->cpuCount)) - 1;
     if ((disconnected & ~grid) || (grid & ~(mask | disconnected)) != (1u << winner))
         return false;
@@ -526,6 +803,7 @@ void BeginSelection()
     s_finishSent   = 0;
     ResetKnockoutEvents();
     ResetItemStates();
+    ResetTournament();
     if (++s_nonce == 0)
         ++s_nonce;
     s_lastPrepareTick = s_ticks;
@@ -721,9 +999,20 @@ void Tick()
     }
     if (s_committed && IsOwner() && s_ticks % 60 == 0)
         GPReport::ReportU32("wl:cpu_ping", CurrentPlan()->epoch);
+    if (RaceKnockoutEnabled()) {
+        RaceKnockoutRosterReady();
+        if (IsOwner() && s_courseResultLength && !KnockoutRoundCommitted() &&
+            s_ticks - s_lastCourseSend >= 60) {
+            s_lastCourseSend = s_ticks;
+            GPReport::ReportB64Encode("wl:ko_course", s_courseResult, s_courseResultLength);
+        }
+    }
     if (s_waiting && !s_committed && s_pending.epoch && s_ticks - s_lastAckTick >= 60) {
         s_lastAckTick = s_ticks;
-        GPReport::ReportU32("wl:cpu_ack", s_pending.epoch);
+        GPReport::ReportU32(
+            s_pending.knockoutMode == 2 && !s_tournamentReady ? "wl:cpu_plan" : "wl:cpu_ack",
+            s_pending.epoch
+        );
     }
     if (s_ticks % 3 == 0)
         RetryFinishedCPUFrames();
@@ -770,6 +1059,45 @@ WWFC_DEFINE_PATCH = Patch::BranchWithCTR(WWFC_PATCH_LEVEL_FEATURE, 0x800D3648, T
 #  else
 namespace wwfc::OnlineCPU
 {
+bool RaceKnockoutEnabled()
+{
+    return false;
+}
+
+bool RaceKnockoutRosterReady()
+{
+    return false;
+}
+
+u8 InitialKnockoutPlacement(u8)
+{
+    return 0;
+}
+
+u16 InitialKnockoutMask()
+{
+    return 0;
+}
+
+bool KnockoutRoundCommitted()
+{
+    return false;
+}
+
+u16 KnockoutCourseDNFMask()
+{
+    return 0;
+}
+
+bool PublishRaceKnockoutResult(u32)
+{
+    return false;
+}
+
+void RequestRaceKnockoutCommit()
+{
+}
+
 u8 KnockoutWinnerId()
 {
     return 0xff;
