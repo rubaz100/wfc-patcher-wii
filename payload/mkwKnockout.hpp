@@ -14,13 +14,13 @@ void OnPlayerFinished(mkw::RaceManager::Player& player);
 
 // Synthetic knockout finishes must not be rewritten/reported as ordinary
 // race times by mkwTime's shared retail finish hook.
-bool           NormalizeRetiredFinish(mkw::RaceManager::Player& player);
-bool           IsSpectatorTestRoom();
-bool           IsEliminated(u8 playerId);
-u8             EliminationPlacement(u8 playerId);
-// True for the single racer currently in last place and still in an active
-// applied Knockout race — the one who will be eliminated at the next leader
-// lap. Used to warn them via a red blinking position number. False otherwise.
+bool NormalizeRetiredFinish(mkw::RaceManager::Player& player);
+bool IsSpectatorTestRoom();
+bool IsEliminated(u8 playerId);
+u8   EliminationPlacement(u8 playerId);
+// Live warning only: Round marks its last unfinished racer; Race marks up to
+// the configured bottom 1/2 entrants after reserving slots for known DNFs/DCs
+// and retaining one series winner. Carried/finished racers are not warned.
 bool           IsEliminationCandidate(u8 playerId);
 const wchar_t* EliminationNotice(u8 hudSlot);
 bool           CopyEliminationNotice(u8 hudSlot, wchar_t (&output)[128], u32& generation);

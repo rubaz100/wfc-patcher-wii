@@ -8,7 +8,6 @@
 #  include "mkwKnockout.hpp"
 #  include "mkwKnockoutNotice.hpp"
 #  include "mkwOnlineCPU.hpp"
-#  include "wwfcGPReport.hpp"
 #  include "wwfcLibC.hpp"
 #  include "wwfcPatch.hpp"
 
@@ -288,56 +287,159 @@ WWFC_DEFINE_PATCH =
 WWFC_DEFINE_PATCH =
     Patch::WritePointer(WWFC_PATCH_LEVEL_FEATURE, 0x808D3D28, RaceNotice::UpdateLapControl);
 
-// --- Elimination warning: blinking position number -------------------------
-// The racer currently in last place in an active Knockout race (the next to be
-// eliminated) has their on-track position number flash on and off, as a warning.
-// CtrlRaceRankNum derives from LayoutUIControl; the game drives it through the
-// shared update virtual at vtable+0x10 (0x808D3E98 + 0x10 = 0x808D3EA8), the
-// same slot the lap/finish-notice hooks use, whose native body is the shared
-// 0x8063DB00. We run that first, then, only for the elimination candidate's own
-// control, flash the whole display by toggling UIControl::isHidden (the number
-// has a separate per-position pane, so poking one pane's colour/alpha doesn't
-// work; the control-level hidden flag is reliable). A red tint is a follow-up.
-// Addresses from the Pulsar symbol map / UIControl header; PAL only.
+// --- Elimination warning: red, blinking position number --------------------
+// PAL retail stores the transparent position_l_00 overlay at control+0x1A0.
+// The visible rank is the separate Picture named "position". Select that exact
+// pane through the same nonvirtual layout lookup used by native rank Init;
+// never recolor the shadow/decorations or call a guessed pane virtual method.
 namespace Placement
 {
 
 struct RankNumControl {
-    FILL(0x000, 0x19C);
-    u32 playerId; // 0x19C
+    void* vtable;
+    FILL(0x004, 0x190);
+    u8 hudSlot;
+    FILL(0x191, 0x19C);
+    u32   playerId;
+    void* positionPane;
 };
+
+static_assert(__builtin_offsetof(RankNumControl, hudSlot) == 0x190);
 static_assert(__builtin_offsetof(RankNumControl, playerId) == 0x19C);
+static_assert(__builtin_offsetof(RankNumControl, positionPane) == 0x1A0);
+static_assert(sizeof(RankNumControl) == 0x1A4);
 
-// UIControl::isHidden @ 0x80 is a control-level draw gate (checked by Draw, not
-// driven by pane animations), so toggling it reliably flashes the whole position
-// display — whichever per-position pane is currently shown — on and off.
-constexpr u32 UICONTROL_ISHIDDEN_OFFSET = 0x80;
+constexpr u32 RANK_VTABLE        = 0x808D3E98;
+constexpr u32 PICTURE_VTABLE     = 0x80273500;
+constexpr u32 PICTURE_COLOURS    = 0xD8;
+constexpr u32 PICTURE_COLOUR_END = 0xE8;
+constexpr u32 PANE_NAME          = 0xBC;
+constexpr u32 PANE_PARENT        = 0x0C;
+constexpr u32 CONTROL_HIDDEN     = 0x80;
+// At 60 HUD updates per second: half a second visible, half a second hidden.
+constexpr u32 BLINK_HALF_PERIOD = 30;
 
-constinit u32  s_blinkFrame   = 0;
-constinit bool s_wasBlinking  = false;
+[[gnu::longcall]] void  NativeRankInit(RankNumControl*) AT(0x807F48FC);
+[[gnu::longcall]] void  NativeRankUpdate(RankNumControl*) AT(0x8063DB00);
+[[gnu::longcall]] void* NativeFindPane(void*, const char*) AT(0x805E8368);
+
+struct WarningState {
+    RankNumControl* control;
+    void*           anchor;
+    void*           picture;
+    u32             original[4];
+    u32             applied[4];
+    u32             frame;
+    u8              nativeHidden;
+    u8              appliedHidden;
+    bool            owned;
+};
+
+constinit WarningState s_warning[4] = {};
+
+bool InGameSpan(const void* pointer, u32 size)
+{
+    const u32 address = reinterpret_cast<u32>(pointer);
+    return !(address & 3) && size &&
+           ((address >= 0x80000000u && address < 0x81800000u && size <= 0x81800000u - address) ||
+            (address >= 0x90000000u && address < 0x94000000u && size <= 0x94000000u - address));
+}
+
+bool IsRankControl(const RankNumControl* control)
+{
+    return InGameSpan(control, sizeof(*control)) &&
+           control->vtable == reinterpret_cast<void*>(RANK_VTABLE);
+}
+
+bool IsPicture(const void* pointer, const char* name, u32 nameLength)
+{
+    return InGameSpan(pointer, PICTURE_COLOUR_END) &&
+           *static_cast<const u32*>(pointer) == PICTURE_VTABLE &&
+           !std::memcmp(static_cast<const u8*>(pointer) + PANE_NAME, name, nameLength);
+}
+
+bool IsRankPicture(const RankNumControl* control, const void* picture)
+{
+    constexpr char name[]       = "position";
+    constexpr char anchorName[] = "position_l_00";
+    if (!IsPicture(picture, name, sizeof(name)) ||
+        !IsPicture(control->positionPane, anchorName, sizeof(anchorName)))
+        return false;
+    const void* parent =
+        *reinterpret_cast<void* const*>(static_cast<const u8*>(picture) + PANE_PARENT);
+    return InGameSpan(parent, 0xD8) &&
+           parent == *reinterpret_cast<void* const*>(
+                         static_cast<const u8*>(control->positionPane) + PANE_PARENT
+                     );
+}
+
+void RestoreWarning(WarningState& state, RankNumControl* control)
+{
+    if (!state.owned || state.control != control)
+        return;
+    if (state.anchor == control->positionPane && IsRankPicture(control, state.picture)) {
+        auto* colours = reinterpret_cast<u32*>(static_cast<u8*>(state.picture) + PICTURE_COLOURS);
+        for (u8 i = 0; i < 4; ++i) {
+            if (colours[i] == state.applied[i])
+                colours[i] = state.original[i];
+        }
+    }
+    u8& hidden = reinterpret_cast<u8*>(control)[CONTROL_HIDDEN];
+    if (hidden == state.appliedHidden)
+        hidden = state.nativeHidden;
+    state.owned = false;
+}
+
+void InitRankNum(RankNumControl* control)
+{
+    if (!IsRankControl(control))
+        return;
+    // A new layout may reuse the prior object's addresses. Forget ownership
+    // without dereferencing old panes; native Init establishes the new colors.
+    if (control->hudSlot < 4)
+        s_warning[control->hudSlot] = {};
+    NativeRankInit(control);
+}
 
 void UpdateRankNum(RankNumControl* control)
 {
-    [[gnu::longcall]] void nativeUpdate(RankNumControl*) AT(0x8063DB00);
-    nativeUpdate(control);
-
-    if (!control)
+    if (!IsRankControl(control))
         return;
-    u8& isHidden = reinterpret_cast<u8*>(control)[UICONTROL_ISHIDDEN_OFFSET];
-
-    if (!IsEliminationCandidate(static_cast<u8>(control->playerId))) {
-        // No longer last: if we were blinking this control, leave it visible.
-        if (s_wasBlinking) {
-            isHidden      = 0;
-            s_wasBlinking = false;
-        }
+    WarningState* state = control->hudSlot < 4 ? &s_warning[control->hudSlot] : nullptr;
+    if (state && state->control == control)
+        RestoreWarning(*state, control);
+    // Restore our previous frame BEFORE native animation updates. Capture the
+    // fresh native colors/visibility afterwards; never force white on exit.
+    NativeRankUpdate(control);
+    if (!state || !IsRankControl(control))
+        return;
+    if (control->playerId >= 12 || !IsEliminationCandidate(static_cast<u8>(control->playerId))) {
+        *state = {};
         return;
     }
-
-    // Blink the whole position display ~4 Hz by toggling the control's hidden
-    // flag. (Red tint is a follow-up: recolour the current per-position pane.)
-    s_wasBlinking = true;
-    isHidden      = ((s_blinkFrame++ / 8) & 1) ? 1 : 0;
+    if (state->control != control) {
+        *state         = {};
+        state->control = control;
+    }
+    state->anchor  = control->positionPane;
+    state->picture = NativeFindPane(reinterpret_cast<u8*>(control) + 0xA8, "position");
+    if (IsRankPicture(control, state->picture)) {
+        auto* colours = reinterpret_cast<u32*>(static_cast<u8*>(state->picture) + PICTURE_COLOURS);
+        for (u8 i = 0; i < 4; ++i) {
+            state->original[i] = colours[i];
+            // Big-endian RGBA: preserve each native vertex's alpha.
+            state->applied[i] = 0xFF000000u | (colours[i] & 0xFFu);
+            colours[i]        = state->applied[i];
+        }
+    } else {
+        state->picture = nullptr;
+    }
+    u8& hidden           = reinterpret_cast<u8*>(control)[CONTROL_HIDDEN];
+    state->nativeHidden  = hidden;
+    const u8 blinkHidden = ((state->frame++ / BLINK_HALF_PERIOD) & 1) ? 1 : 0;
+    state->appliedHidden = state->nativeHidden ? state->nativeHidden : blinkHidden;
+    hidden               = state->appliedHidden;
+    state->owned         = true;
 }
 
 } // namespace Placement
@@ -345,6 +447,8 @@ void UpdateRankNum(RankNumControl* control)
 // CtrlRaceRankNum::vtable (0x808D3E98) + update (0x10) = 0x808D3EA8, PAL only.
 WWFC_DEFINE_PATCH =
     Patch::WritePointer(WWFC_PATCH_LEVEL_FEATURE, 0x808D3EA8, Placement::UpdateRankNum);
+WWFC_DEFINE_PATCH =
+    Patch::WritePointer(WWFC_PATCH_LEVEL_FEATURE, 0x808D3EA4, Placement::InitRankNum);
 
 } // namespace wwfc::Knockout
 #endif

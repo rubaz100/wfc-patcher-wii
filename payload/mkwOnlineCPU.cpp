@@ -16,6 +16,7 @@
 #    include "import/mkw/system/System.hpp"
 #    include "mkwKnockdownMode.hpp"
 #    include "mkwKnockout.hpp"
+#    include "mkwPenalty.hpp"
 #    include "wwfcGPReport.hpp"
 #    include "wwfcLibC.hpp"
 #    include "wwfcPatch.hpp"
@@ -448,6 +449,8 @@ void Buddy(void* connection, const BuddyMessage* argument, void* param)
         while (length < 256 && text[length])
             ++length;
         if (length < 256 && length >= 8) {
+            if (Penalty::HandleServerMessage(text))
+                return;
             if (!std::strncmp(text, "LCPU3:", 6)) {
                 Message(text);
                 return;

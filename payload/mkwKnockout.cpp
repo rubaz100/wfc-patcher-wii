@@ -705,8 +705,67 @@ bool IsEliminationCandidate(u8 id)
     const u8 count   = configs ? configs->getConfig().playerCount() : 0;
     if (!IsSpectatorTestRoom() || !race || race != s_boundRace ||
         race->m_state != RaceManager::EState::RACE || !race->m_players ||
-        !race->m_playerIdInEachPosition || !count || count != s_gridCount)
+        !race->m_playerIdInEachPosition || !count || count > MAX_PLAYERS || id >= count ||
+        count != s_gridCount)
         return false;
+    if (OnlineCPU::RaceKnockoutEnabled()) {
+        const auto* plan = OnlineCPU::CurrentPlan();
+        if (!s_carriedSeeded || !plan || plan->epoch != s_boundEpoch ||
+            plan->knockoutEliminationCount < 1 || plan->knockoutEliminationCount > 2)
+            return false;
+        // Predict only live entrants at risk after this course. Finished
+        // valid racers are ahead of the unfinished field; an existing DC or
+        // DNF already consumes a bottom slot in the server's course ranking.
+        u16 seen = 0, live = 0;
+        u8  entrants = 0, terminal = 0;
+        for (u8 position = 0; position < count; ++position) {
+            const u8 pid = race->m_playerIdInEachPosition[position];
+            if (pid >= count || (seen & (1u << pid)))
+                return false;
+            seen |= 1u << pid;
+            const auto* player = race->m_players[pid];
+            if (!player || player->m_id != pid)
+                return false;
+            if (s_raceState.placement(pid))
+                continue;
+            ++entrants;
+            if (player->m_stateFlags &
+                (RaceManager::Player::FLAG_DISCONNECTED | RaceManager::Player::FLAG_RETIRED)) {
+                ++terminal;
+            } else if (player->m_stateFlags & RaceManager::Player::FLAG_FINISHED) {
+                const auto* time = player->m_raceFinishTime;
+                if (!time ||
+                    !IsPacketRaceTime(
+                        time->m_minutes, time->m_seconds, time->m_milliseconds, time->m_valid
+                    ) ||
+                    !Milliseconds(*time))
+                    ++terminal;
+            } else {
+                live |= 1u << pid;
+            }
+        }
+        // Every series retains one winner, including a two-out race with only
+        // two entrants left. Never warn a live racer for a slot already taken
+        // by a terminal entrant, or warn a completed safe finisher.
+        if (entrants < 2 || !(live & (1u << id)))
+            return false;
+        u8 threatened = plan->knockoutEliminationCount;
+        if (threatened >= entrants)
+            threatened = entrants - 1;
+        if (terminal >= threatened)
+            return false;
+        threatened -= terminal;
+        for (int position = count - 1; position >= 0; --position) {
+            const u8 pid = race->m_playerIdInEachPosition[position];
+            if (!(live & (1u << pid)))
+                continue;
+            if (pid == id)
+                return true;
+            if (--threatened == 0)
+                return false;
+        }
+        return false;
+    }
     // The elimination candidate is the current last-place racer still in the
     // race: scan the live position order from the back, skipping the already-
     // eliminated and the finished/disconnected/retired.

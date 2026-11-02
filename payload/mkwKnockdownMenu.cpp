@@ -6,6 +6,7 @@
 #  include "import/mkw/ui/page/MessagePopupPage.hpp"
 #  include "import/mkw/ui/section/SectionManager.hpp"
 #  include "mkwKnockdownMode.hpp"
+#  include "mkwPenalty.hpp"
 #  include "wwfcPatch.hpp"
 
 namespace wwfc::KnockdownMenu
@@ -110,6 +111,7 @@ constinit bool                         s_areaSaved = false;
 
 [[gnu::longcall]] void NativeMenuInit(MenuView*) AT(0x8064B910);
 [[gnu::longcall]] void NativeMenuActivate(MenuView*) AT(0x8064BC90);
+[[gnu::longcall]] void NativeMenuUpdate(MenuView*) AT(0x805BB22C);
 [[gnu::longcall]] void NativeRegionalClick(MenuView*, ButtonView*, u32) AT(0x8064BDC4);
 [[gnu::longcall]] void
 NativeSetMessage(LayoutView*, u32, const mkw::UI::FormatParam*) AT(0x8063DDB4);
@@ -260,6 +262,13 @@ void Activate(MenuView* page)
     ConfigureMenu(page);
 }
 
+void Update(MenuView* page)
+{
+    NativeMenuUpdate(page);
+    if (IsMenu(page))
+        Penalty::TickMenu();
+}
+
 u32 GlobeNextPage(const GlobeView* page)
 {
     const u32 next = NativeGlobeNextPage(page);
@@ -273,6 +282,8 @@ u32 GlobeNextPage(const GlobeView* page)
 // complete native function and the independent friend-menu/MOTD hooks intact.
 WWFC_DEFINE_PATCH = Patch::WritePointer(WWFC_PATCH_LEVEL_FEATURE, 0x808BFF6C, Init);
 WWFC_DEFINE_PATCH = Patch::WritePointer(WWFC_PATCH_LEVEL_FEATURE, 0x808BFF74, Activate);
+// Only this page's OnUpdate slot; the shared native no-op stays untouched.
+WWFC_DEFINE_PATCH = Patch::WritePointer(WWFC_PATCH_LEVEL_FEATURE, 0x808BFF94, Update);
 // GlobeSearch vtable + GetNextPage (0x10); preserve all other native destinations.
 WWFC_DEFINE_PATCH = Patch::WritePointer(WWFC_PATCH_LEVEL_FEATURE, 0x808BAAE0, GlobeNextPage);
 
