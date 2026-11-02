@@ -413,6 +413,25 @@ void UpdateRankNum(RankNumControl* control)
     NativeRankUpdate(control);
     if (!state || !IsRankControl(control))
         return;
+
+    // Spectator: once the local player is eliminated, their frozen placement is
+    // meaningless while they watch other racers, so hide the position number
+    // entirely (the race HUD has no text pane here to print "SPECTATOR"). Reuses
+    // the same owned/restore bookkeeping as the warning blink.
+    if (control->playerId < 12 && IsEliminated(static_cast<u8>(control->playerId))) {
+        if (state->control != control) {
+            *state         = {};
+            state->control = control;
+        }
+        state->picture       = nullptr; // no colour change, only hide
+        u8& hidden           = reinterpret_cast<u8*>(control)[CONTROL_HIDDEN];
+        state->nativeHidden  = hidden;
+        state->appliedHidden = 1;
+        hidden               = 1;
+        state->owned         = true;
+        return;
+    }
+
     if (control->playerId >= 12 || !IsEliminationCandidate(static_cast<u8>(control->playerId))) {
         *state = {};
         return;
