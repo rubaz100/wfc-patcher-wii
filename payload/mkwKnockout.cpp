@@ -697,6 +697,37 @@ u8 EliminationPlacement(u8 id)
     return IsSpectatorTestRoom() ? s_raceState.placement(id) : 0;
 }
 
+bool IsEliminationCandidate(u8 id)
+{
+#  if WWFC_KNOCKOUT_APPLY
+    auto*    race    = RaceManager::Instance();
+    auto*    configs = RaceConfigManager::Instance();
+    const u8 count   = configs ? configs->getConfig().playerCount() : 0;
+    if (!IsSpectatorTestRoom() || !race || race != s_boundRace ||
+        race->m_state != RaceManager::EState::RACE || !race->m_players ||
+        !race->m_playerIdInEachPosition || !count || count != s_gridCount)
+        return false;
+    // The elimination candidate is the current last-place racer still in the
+    // race: scan the live position order from the back, skipping the already-
+    // eliminated and the finished/disconnected/retired.
+    for (int pos = count - 1; pos >= 0; --pos) {
+        const u8 pid = race->m_playerIdInEachPosition[pos];
+        if (pid >= count || s_raceState.placement(pid))
+            continue;
+        const auto* player = race->m_players[pid];
+        if (!player || player->m_id != pid ||
+            (player->m_stateFlags &
+             (RaceManager::Player::FLAG_FINISHED | RaceManager::Player::FLAG_DISCONNECTED |
+              RaceManager::Player::FLAG_RETIRED)))
+            continue;
+        return pid == id;
+    }
+    return false;
+#  else
+    return false;
+#  endif
+}
+
 const wchar_t* EliminationNotice(u8 hudSlot)
 {
 #  if WWFC_KNOCKOUT_APPLY
