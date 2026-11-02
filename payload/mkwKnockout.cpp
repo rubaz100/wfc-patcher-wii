@@ -45,6 +45,8 @@ using namespace mkw;
 
 #  if WWFC_KNOCKOUT_APPLY
 [[gnu::longcall]] bool NativeIsOnlineVSInputIdle(void*, u32, u32, u32) AT(0x805235D4);
+[[gnu::longcall]] bool NativeCheckOnlineVSLowSpeed(void*) AT(0x8053EE50);
+[[gnu::longcall]] bool NativeCheckOnlineVSProgress(void*) AT(0x8053EFD4);
 #  endif
 
 namespace
@@ -60,6 +62,7 @@ constinit u32          s_appliedSequence    = 0;
 constinit u16          s_retireEffectMask   = 0;
 constinit u16          s_resultReportedMask = 0;
 constinit u8           s_afkReportedMask    = 0;
+constinit bool         s_stallGuardReported = false;
 constinit u8           s_spectatorPlayer    = MAX_PLAYERS;
 constinit u8           s_spectatorTarget    = MAX_PLAYERS;
 constinit bool         s_followLeader       = true;
@@ -81,6 +84,7 @@ void Reset()
     s_retireEffectMask   = 0;
     s_resultReportedMask = 0;
     s_afkReportedMask    = 0;
+    s_stallGuardReported = false;
     s_spectatorPlayer    = MAX_PLAYERS;
     s_spectatorTarget    = MAX_PLAYERS;
     s_followLeader       = true;
@@ -131,6 +135,23 @@ bool IsOnlineVSInputIdle(void* input, u32 controllerIndex, u32 idleLimit, u32 un
     if (!(s_afkReportedMask & bit) && GPReport::ReportU32("wl:ko_afk", controllerIndex))
         s_afkReportedMask |= bit;
     return false;
+}
+
+void CheckOnlineVSStalling(void* mode)
+{
+    auto* race    = RaceManager::Instance();
+    auto* configs = RaceConfigManager::Instance();
+    if (race && configs && IsLocalSpectator(*race, configs->getConfig())) {
+        // Vanish intentionally stops an eliminated kart. Native low-speed and
+        // no-progress checks would treat that stationary spectator as idle.
+        // This report records bypassing both checks, not either one expiring.
+        if (!s_stallGuardReported &&
+            GPReport::ReportU32("wl:ko_stall_guard", (3u << 8) | s_spectatorPlayer))
+            s_stallGuardReported = true;
+        return;
+    }
+    NativeCheckOnlineVSLowSpeed(mode);
+    NativeCheckOnlineVSProgress(mode);
 }
 
 u32 Milliseconds(const mkw::Time& time)
@@ -608,6 +629,22 @@ void Tick()
 }
 
 #  if WWFC_KNOCKOUT_APPLY
+// Preserve the complete native mr/bl/mr/bl pair. Both incoming branches target
+// its first word at 0x8053F444; none enters the interior. The displaced BL
+// relocations reference the two original watchdogs, and no symbol, incoming
+// relocation, or data pointer targets the interior. The following reload at
+// 0x8053F454 and the independent input/time/network checks remain native.
+WWFC_DEFINE_PATCH = Patch::CallWithCTR(
+    WWFC_PATCH_LEVEL_FEATURE, 0x8053F444,
+    ASM_LAMBDA(
+        ( : ASM_IMPORT(i, CheckOnlineVSStalling)),
+        // clang-format off
+        mr r3, r31;
+        b %[CheckOnlineVSStalling];
+        // clang-format on
+    )
+);
+
 // Replace clrlwi/li/li/bl as one block. The input-manager load at 0x8053F234
 // and the result compare/branch at 0x8053F248/0x8053F24C stay native. No native
 // branch, symbol, relocation, or data pointer enters the displaced block.

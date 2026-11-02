@@ -1,4 +1,13 @@
-# Current integration: 0.3.10 / protocol 3
+# Current integration: 0.3.11 / protocol 3
+
+Version 0.3.11 closes a spectator motion-watchdog gap: native low-speed and
+no-progress checks still timed out a deliberately stopped eliminated local
+kart after about 3,600 frames. A complete 16-byte call-pair hook at PAL
+`8053F444` runs both original checks in order unless existing active local
+spectator guards pass. It never clears shared GM+114, so other termination
+causes retain native behavior. One accepted `wl:ko_stall_guard` report per race
+records `(3 << 8) | localRacerId`, meaning both checks were bypassed, not expired.
+No tests or autonomous races. See root `docs/release-0.3.11.md`.
 
 The M3 notes below are historical. The regular release now builds PAL with both
 CPU and Knockout adapters, freezes the mode in an agreed public/private VS plan,
