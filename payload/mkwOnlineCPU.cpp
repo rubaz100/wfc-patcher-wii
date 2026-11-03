@@ -535,6 +535,45 @@ bool IsLocalProfileSeriesEliminated()
     return false;
 }
 
+u32 EliminatedSeriesVotingAids(u32 candidates, bool committedOnly)
+{
+    // Only the committed upcoming SELECT metadata identifies this course's
+    // spectators. In-race grid IDs/AIDs can still belong to the previous race.
+    if (!s_protocol || !s_waiting || (committedOnly && !s_committed) || s_allocated || s_gridCanceled ||
+        !s_pending.epoch || s_pending.knockoutMode != 2 || !s_pending.seriesId ||
+        !s_tournamentReady || RaceKnockoutSeriesComplete())
+        return 0;
+    const auto* network = mkw::NetManager::Instance();
+    if (!network || network->myAid() >= MAX_PLAYERS)
+        return 0;
+    const u8  own       = network->myAid();
+    const u32 connected = network->availableAids();
+    const u32 self      = Self();
+    u32       excluded  = 0;
+    for (u8 aid = 0; aid < MAX_PLAYERS; ++aid) {
+        const u32 bit = 1u << aid;
+        if (!(candidates & bit))
+            continue;
+        u32 pid = 0;
+        if (aid == own) {
+            pid = self;
+        } else if (connected & bit) {
+            const auto* node = DWC::DWCi_NodeInfoList_GetNodeInfoForAid(aid);
+            if (node)
+                pid = node->profileId;
+        }
+        if (!pid)
+            continue;
+        for (u8 i = 0; i < s_carriedHumanCount; ++i) {
+            if (s_carriedHumanPID[i] == pid && s_carriedHumanPlace[i] != 0) {
+                excluded |= bit;
+                break;
+            }
+        }
+    }
+    return excluded;
+}
+
 u8 InitialKnockoutPlacement(u8 id)
 {
     const auto* plan = CurrentPlan();
@@ -1125,6 +1164,11 @@ bool RaceKnockoutRosterReady()
 bool IsLocalProfileSeriesEliminated()
 {
     return false;
+}
+
+u32 EliminatedSeriesVotingAids(u32, bool)
+{
+    return 0;
 }
 
 u8 InitialKnockoutPlacement(u8)

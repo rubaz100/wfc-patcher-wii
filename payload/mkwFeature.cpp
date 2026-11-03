@@ -116,17 +116,15 @@ WWFC_DEFINE_PATCH =
         RMCXD_PORT(0x806579A0, 0x80653518, 0x8065700C, 0x80645CB8, 0x80657EE4),
         
         [](mkw::NetManager* netController) -> void {
+    NetSelectHandler* selectHandler = NetSelectHandler::Instance();
+    if (selectHandler)
+        EliminatedVoting::NormalizeLocalVote(*selectHandler);
     netController->sendRacePacket();
 
     NetUserHandler::Instance()->calc();
 
-    NetSelectHandler* selectHandler = NetSelectHandler::Instance();
+    selectHandler = NetSelectHandler::Instance();
     if (selectHandler) {
-        // Eliminated-spectator vote exclusion is disabled: forcing NOT_SELECTED
-        // here makes the game's anti-stall watchdog kick the non-voting player
-        // and disconnect the room (observed wl:stall). The correct approach -
-        // dropping the eliminated AID at winner selection while it still casts a
-        // vote - is pending a PID-to-AID mapping.
         selectHandler->processKicks();
     }
 }
@@ -179,7 +177,7 @@ WWFC_DEFINE_PATCH =
 
         []() -> void {
     NetSelectHandler* selectHandler = NetSelectHandler::Instance();
-    selectHandler->decideCourse();
+    EliminatedVoting::DecideCourse(*selectHandler);
     selectHandler->initPlayerIdsToPlayerAids();
 
 
@@ -190,10 +188,8 @@ WWFC_DEFINE_PATCH =
         "wl:mkw_select_cc", static_cast<u32>(selectHandler->getSendPacket().engineClass)
     );
 
-    // Voting diagnostic (report-first): record the vote bitmask, the chosen
-    // winning voter, and every AID's course vote next to the decided course, so
-    // eliminated-player voting can be understood from the log before excluding
-    // it. Behaviour-neutral: reads only, changes nothing.
+    // Record submitted votes and the final winner after spectator filtering.
+    // The original vote-received mask and per-AID packets remain untouched.
     wwfc::GPReport::ReportU32("wl:vote_mask", selectHandler->getAidsWithVote());
     wwfc::GPReport::ReportU32(
         "wl:vote_win", static_cast<u32>(selectHandler->getSendPacket().winningVoterAid)

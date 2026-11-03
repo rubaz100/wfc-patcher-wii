@@ -49,8 +49,13 @@ bool RaceKnockoutRosterReady();
 u8   InitialKnockoutPlacement(u8 playerId);
 // True when the local console's own profile is an eliminated human in the
 // current series, derived from the LCPU3:T tournament metadata (available
-// during SELECT, before the next grid is allocated). Used to abstain its vote.
+// during SELECT, before the next grid is allocated).
 bool IsLocalProfileSeriesEliminated();
+// Candidate AIDs belonging to known eliminated/spectating humans in the
+// upcoming Race Knockout grid. Course decisions require the committed plan;
+// vote presentation can use trusted proposal metadata before commit arrives.
+// Unknown identities remain eligible.
+u32 EliminatedSeriesVotingAids(u32 candidates, bool committedOnly = true);
 u16  InitialKnockoutMask();
 bool KnockoutRoundCommitted();
 u16  KnockoutCourseDNFMask();

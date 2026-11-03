@@ -126,6 +126,11 @@ public:
         return m_gameMode == EGameMode::WIFI_FRIEND_VS || m_gameMode == EGameMode::WIFI_PUBLIC_VS;
     }
 
+    ECourse course() const
+    {
+        return m_course;
+    }
+
     u8 playerCount() const
     {
         return m_playerCount;
@@ -242,6 +247,11 @@ class RaceConfigManager
 {
 public:
     constexpr RaceConfig& getConfig()
+    {
+        return m_conf;
+    }
+
+    constexpr const RaceConfig& getConfig() const
     {
         return m_conf;
     }
