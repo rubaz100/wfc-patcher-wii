@@ -122,14 +122,11 @@ WWFC_DEFINE_PATCH =
 
     NetSelectHandler* selectHandler = NetSelectHandler::Instance();
     if (selectHandler) {
-        // Eliminated series spectators must not influence the next track: force
-        // the local vote to NOT_SELECTED so the game drops it from the voter
-        // pool (confirmed in the log: non-voters are excluded from the winner).
-        // Self-mark only, so all clients stay in sync.
-        if (EliminatedVoting::Enabled() && OnlineCPU::IsLocalProfileSeriesEliminated()) {
-            selectHandler->getSendPacket().player[0].courseVote =
-                ECourse::CONTROL_VOTING_NOT_SELECTED;
-        }
+        // Eliminated-spectator vote exclusion is disabled: forcing NOT_SELECTED
+        // here makes the game's anti-stall watchdog kick the non-voting player
+        // and disconnect the room (observed wl:stall). The correct approach -
+        // dropping the eliminated AID at winner selection while it still casts a
+        // vote - is pending a PID-to-AID mapping.
         selectHandler->processKicks();
     }
 }
