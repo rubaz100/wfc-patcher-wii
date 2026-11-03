@@ -3,6 +3,7 @@
 #if RMC && WWFC_ONLINE_CPU_APPLY && RMCPD00
 
 #  include "import/dwc.h"
+#  include "import/rfl.h"
 #  include "import/mkw/net/NetManager.hpp"
 #  include "import/mkw/system/RaceConfig.hpp"
 #  include "import/mkw/system/RaceManager.hpp"
@@ -10,6 +11,7 @@
 #  include "import/mkw/ui/section/SectionManager.hpp"
 #  include "mkwKnockdownMode.hpp"
 #  include "mkwOnlineCPU.hpp"
+#  include "wwfcLibC.hpp"
 #  include "wwfcPatch.hpp"
 
 namespace wwfc::OnlineCPU
@@ -18,6 +20,82 @@ namespace Grid
 {
 
 using namespace mkw;
+
+namespace
+{
+
+// Deterministic 32-bit finalizer (splitmix32). Every console derives each CPU's
+// character, vehicle and name from the shared plan seed, so the networked grid
+// stays identical without any extra agreement traffic.
+u32 MixSeed(u32 x)
+{
+    x += 0x9E3779B9u;
+    x = (x ^ (x >> 16)) * 0x85EBCA6Bu;
+    x = (x ^ (x >> 13)) * 0xC2B2AE35u;
+    return x ^ (x >> 16);
+}
+
+// Short internet-meme handles (each <= RFL_NAME_LEN code units) for the
+// otherwise-nameless online CPU racers. Each race hands out distinct names. A
+// flat char matrix avoids any load-time pointer relocation in the payload.
+constexpr char kCpuNames[][11] = {
+    "Skibidi",    "Rizzler", "Gyatt",   "Sigma",  "Ohio",    "Fanum",
+    "NPC",        "Sus",     "Sheesh",  "Bussin", "Goated",  "Delulu",
+    "Aura",       "Mewing",  "Based",   "NoCap",  "Grimace", "Baka",
+    "Gronk",      "Glizzy",  "Chad",    "Yeet",   "Mogged",  "Drip",
+    "Tung Sahur", "MrBeast", "MrLeast", "Obama",  "Trump",   "Merkel",
+    "Merz",       "Verity",
+};
+constexpr u32 kCpuNameCount = sizeof(kCpuNames) / sizeof(kCpuNames[0]);
+
+// The driver is a real character, so a CPU's Mii mesh is never drawn; the Mii
+// only supplies the HUD/results name. Copy a connected player's Mii as a known
+// -valid container, neutralize its console identity, then overwrite the name
+// and refresh the CRC exactly as the Mii privacy scrubber does.
+void StampCpuName(RaceConfigPlayer* player, const RaceConfigPlayer* source, const char* name)
+{
+    std::memcpy(player->m_mii, source->m_mii, sizeof(player->m_mii));
+    auto* mii                    = reinterpret_cast<RFL::RFLiStoreData*>(player->m_mii);
+    mii->data.createID.miiID     = 0x80000000;
+    mii->data.createID.consoleID = 0;
+    bool past                    = false;
+    for (u32 i = 0; i < RFL::RFL_NAME_LEN; ++i) {
+        const char c = past ? '\0' : name[i];
+        if (c == '\0')
+            past = true;
+        mii->data.name[i] = static_cast<u16>(static_cast<u8>(c));
+    }
+    std::memset(mii->data.creatorName, 0, sizeof(mii->data.creatorName));
+    mii->checksum = 0;
+    mii->checksum = RFL::RFLiCalculateCRC(mii, sizeof(RFL::RFLiStoreData));
+}
+
+// Deterministically give one CPU slot a random valid character and a weight
+// -matched vehicle (a natural mix of karts and bikes for VS), plus a meme name.
+void AssignCpuRacer(
+    RaceConfigPlayer* player, const RaceConfigPlayer* miiSource, u32 seed, u8 id, u32 nameBase
+)
+{
+    const u32  stream    = MixSeed(seed ^ MixSeed(id + 1u));
+    const auto character = static_cast<ECharacter>(stream % 24u); // Mario .. Rosalina
+    player->m_character  = character;
+
+    const int weight = GetCharacterWeightClass(character);
+    EVehicle  matches[16];
+    u32       count = 0;
+    for (u32 v = 0; v <= static_cast<u32>(EVehicle::L_PHANTOM) && count < 16; ++v) {
+        const auto vehicle = static_cast<EVehicle>(v);
+        if (GetVehicleWeightClass(vehicle) == weight)
+            matches[count++] = vehicle;
+    }
+    player->m_vehicle = count ? matches[MixSeed(stream) % count] : EVehicle::M_STANDARD_KART;
+
+    StampCpuName(
+        player, miiSource, kCpuNames[(nameBase + static_cast<u32>(id) * 7u) % kCpuNameCount]
+    );
+}
+
+} // namespace
 
 constinit void*             s_selection           = nullptr;
 constinit void*             s_completionSelection = nullptr;
@@ -118,13 +196,14 @@ void InitScenario(RaceConfig* scenario, const RaceConfig* previous)
             return;
         }
     }
-    const bool owner = IsOwner();
+    const bool              owner     = IsOwner();
+    const RaceConfigPlayer* miiSource = scenario->getPlayer(0);
+    const u32               nameBase  = MixSeed(plan.seed) % kCpuNameCount;
     for (u8 id = plan.humanCount; id < total; ++id) {
         auto* player = scenario->getPlayer(id);
         player->m_type =
             owner ? RaceConfigPlayer::EPlayerType::CPU : RaceConfigPlayer::EPlayerType::REMOTE;
-        player->m_character    = ECharacter::MARIO;
-        player->m_vehicle      = EVehicle::M_STANDARD_KART;
+        AssignCpuRacer(player, miiSource, plan.seed, id, nameBase);
         player->m_screenId     = 0xFF;
         player->m_inputIndex   = 0xFF;
         player->m_controllerId = -1;
