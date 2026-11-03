@@ -14,6 +14,7 @@
 #    include "import/mkw/system/RaceConfig.hpp"
 #    include "import/mkw/system/RaceManager.hpp"
 #    include "import/mkw/system/System.hpp"
+#    include "mkwInactivity.hpp"
 #    include "mkwKnockdownMode.hpp"
 #    include "mkwKnockout.hpp"
 #    include "mkwPenalty.hpp"
@@ -52,6 +53,7 @@ constinit u16           s_courseDNF                            = 0;
 constinit u8            s_pendingKnockout[KNOCKOUT_EVENT_SIZE] = {};
 constinit u32           s_lastKnockoutSend                     = 0;
 constinit bool          s_tournamentReady                      = false;
+constinit u32           s_completeSeriesId = 0, s_completeEpoch = 0;
 constinit u8            s_carriedCPU[12] = {}, s_carriedHumanPlace[12] = {};
 constinit u32           s_carriedHumanPID[12] = {}, s_racerPID[12] = {};
 constinit u8            s_racerLocal[12]                  = {};
@@ -211,6 +213,9 @@ void Message(const char* text)
             ResetKnockoutEvents();
             ResetItemStates();
             ResetTournament();
+            // A fresh physical room receives a fresh server proposal. A
+            // completed room emits only Z and never creates another grid.
+            s_completeSeriesId = s_completeEpoch = 0;
         }
         s_pending.epoch           = a;
         s_pending.ownerProfileId  = b;
@@ -223,31 +228,29 @@ void Message(const char* text)
             s_pending.knockoutEliminationCount = 1;
             s_pending.seriesId                 = 0;
             s_pending.seriesRound              = 0;
+            s_pending.seriesState              = 0;
         }
         s_lastAckTick = s_ticks;
-        if (f != 2 || s_tournamentReady)
+        if (!s_completeSeriesId && (f != 2 || s_tournamentReady))
             GPReport::ReportU32("wl:cpu_ack", a);
         break;
     case 'T': {
         if (text[7] != ':' || !s_waiting || s_pending.knockoutMode != 2 ||
             !Wire::Number(p, a, ':') || a != s_pending.epoch || !Wire::Number(p, b, ':') || !b ||
             !Wire::Number(p, c, ':') || c < 1 || c > 12 || !Wire::Number(p, d, ':') || d < 1 ||
-            d > 2)
+            d > 2 || !Wire::Number(p, e, ':') || e > 2)
             break;
+        const u8 state    = static_cast<u8>(e);
         u8       cpus[12] = {}, places[12] = {};
         u32      humans[12] = {};
-        const u8 total      = s_pending.humanCount + s_pending.cpuCount;
-        u16      seenPlaces = 0;
         bool     valid      = true;
         for (u8 i = 0; i < s_pending.cpuCount; ++i) {
-            if (!Wire::Number(p, e, i + 1 == s_pending.cpuCount ? ':' : ',') || e > total ||
-                e == 1 || (e && (seenPlaces & (1u << (e - 1))))) {
+            if (!Wire::Number(p, e, i + 1 == s_pending.cpuCount ? ':' : ',') ||
+                (e != 0 && e != 0xFF && (e < 2 || e > MAX_PLAYERS))) {
                 valid = false;
                 break;
             }
             cpus[i] = static_cast<u8>(e);
-            if (e)
-                seenPlaces |= 1u << (e - 1);
         }
         if (!valid)
             break;
@@ -264,8 +267,7 @@ void Message(const char* text)
                 while (*end && *end != ',')
                     ++end;
                 const char separator = *end;
-                if (!Wire::Number(p, f, separator) || f < 2 || f > total ||
-                    (seenPlaces & (1u << (f - 1)))) {
+                if (!Wire::Number(p, f, separator) || (f != 0xFF && (f < 2 || f > MAX_PLAYERS))) {
                     valid = false;
                     break;
                 }
@@ -276,7 +278,6 @@ void Message(const char* text)
                     break;
                 humans[count]   = e;
                 places[count++] = static_cast<u8>(f);
-                seenPlaces |= 1u << (f - 1);
                 if (!separator)
                     break;
             }
@@ -290,14 +291,33 @@ void Message(const char* text)
         s_pending.seriesId                 = b;
         s_pending.seriesRound              = static_cast<u8>(c);
         s_pending.knockoutEliminationCount = static_cast<u8>(d);
+        s_pending.seriesState              = state;
         s_tournamentReady                  = true;
         s_lastAckTick                      = s_ticks;
-        GPReport::ReportU32("wl:cpu_ack", a);
+        if (state == 2) {
+            s_completeSeriesId = b;
+            s_completeEpoch    = a;
+        } else {
+            s_completeSeriesId = s_completeEpoch = 0;
+            GPReport::ReportU32("wl:cpu_ack", a);
+        }
         break;
     }
+    case 'Z':
+        if (text[7] == ':' && Wire::Number(p, a, ':') && a && Wire::Number(p, b, '\0') && b &&
+            ((s_allocated && s_active.epoch == a && s_active.seriesId == b) ||
+             (s_pending.epoch == a && s_pending.seriesId == b) ||
+             (s_waiting && !s_pending.epoch))) {
+            // This tombstone only holds the NEXT selection. Keep the current
+            // course's K/F stream and native winner/results flow untouched.
+            s_completeSeriesId = b;
+            s_completeEpoch    = a;
+        }
+        break;
     case 'C':
         if (text[7] == ':' && s_waiting && Wire::Number(p, a, '\0') && s_pending.epoch == a &&
-            (s_pending.knockoutMode != 2 || s_tournamentReady)) {
+            (s_pending.knockoutMode != 2 || (s_tournamentReady && s_pending.seriesState != 2)) &&
+            !s_completeSeriesId) {
             s_committed     = true;
             s_alive         = true;
             s_lastOwnerTick = s_ticks;
@@ -451,6 +471,8 @@ void Buddy(void* connection, const BuddyMessage* argument, void* param)
         if (length < 256 && length >= 8) {
             if (Penalty::HandleServerMessage(text))
                 return;
+            if (Inactivity::HandleServerMessage(text))
+                return;
             if (!std::strncmp(text, "LCPU3:", 6)) {
                 Message(text);
                 return;
@@ -480,6 +502,11 @@ bool KnockoutEnabled()
 bool RaceKnockoutEnabled()
 {
     return KnockoutEnabled() && s_active.knockoutMode == 2 && s_tournamentReady;
+}
+
+bool RaceKnockoutSeriesComplete()
+{
+    return s_completeSeriesId != 0 && s_completeEpoch != 0;
 }
 
 bool RaceKnockoutRosterReady()
@@ -815,6 +842,8 @@ void BeginSelection()
 
 bool CanSelectAdvance()
 {
+    if (RaceKnockoutSeriesComplete())
+        return false;
     if (Knockdown::Selected() && (!Knockdown::ServerAvailable() || !s_protocol))
         return false;
     return !s_protocol || (s_waiting && s_committed);
@@ -1010,7 +1039,8 @@ void Tick()
             GPReport::ReportB64Encode("wl:ko_course", s_courseResult, s_courseResultLength);
         }
     }
-    if (s_waiting && !s_committed && s_pending.epoch && s_ticks - s_lastAckTick >= 60) {
+    if (s_waiting && !s_committed && s_pending.epoch && !RaceKnockoutSeriesComplete() &&
+        s_ticks - s_lastAckTick >= 60) {
         s_lastAckTick = s_ticks;
         GPReport::ReportU32(
             s_pending.knockoutMode == 2 && !s_tournamentReady ? "wl:cpu_plan" : "wl:cpu_ack",
@@ -1063,6 +1093,11 @@ WWFC_DEFINE_PATCH = Patch::BranchWithCTR(WWFC_PATCH_LEVEL_FEATURE, 0x800D3648, T
 namespace wwfc::OnlineCPU
 {
 bool RaceKnockoutEnabled()
+{
+    return false;
+}
+
+bool RaceKnockoutSeriesComplete()
 {
     return false;
 }

@@ -29,6 +29,7 @@ struct Plan {
     u8   knockoutEliminationCount;
     u32  seriesId;
     u8   seriesRound;
+    u8   seriesState; // 0 running, 1 one-versus-one final, 2 complete.
 };
 
 // Owner decisions are relayed by the authenticated server in a bounded ordered
@@ -43,6 +44,7 @@ struct KnockoutEvent {
 
 bool KnockoutEnabled();
 bool RaceKnockoutEnabled();
+bool RaceKnockoutSeriesComplete();
 bool RaceKnockoutRosterReady();
 u8   InitialKnockoutPlacement(u8 playerId);
 u16  InitialKnockoutMask();

@@ -395,7 +395,7 @@ void Tick()
         const u8 eliminatedPlace = Knockout::EliminationPlacement(id);
         // Stopped karts remain native-unfinished while spectating. Their live
         // distance rank can move; keep the agreed KO placement on the panel.
-        out[9] = eliminatedPlace ? eliminatedPlace
+        out[9] = eliminatedPlace == 0xFF ? 0 : eliminatedPlace ? eliminatedPlace
                                  : (player->m_position <= count ? player->m_position : 0);
         const float progress = Load<float>(player, 0x0C);
         WriteFloat(out + 12, progress >= 0.0f && progress <= 255.0f ? progress : 0.0f);

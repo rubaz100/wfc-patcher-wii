@@ -8,6 +8,8 @@
 #  include "mkwKnockout.hpp"
 #  include "mkwKnockoutNotice.hpp"
 #  include "mkwOnlineCPU.hpp"
+#  include "mkwSpeedometer.hpp"
+#  include "wwfcGPReport.hpp"
 #  include "wwfcLibC.hpp"
 #  include "wwfcPatch.hpp"
 
@@ -30,9 +32,17 @@ struct BmgView {
 };
 
 struct TextPane {
-    FILL(0x00, 0xB8);
-    u8 alpha;
+    FILL(0x00, 0x2C);
+    float trans[3]; // 0x2C nw4r::lyt::Pane::trans (x, y, z)
+    FILL(0x38, 0x44);
+    float scale[2]; // 0x44 nw4r::lyt::Pane::scale (x, y)
+    FILL(0x4C, 0xB8);
+    u8 alpha;       // 0xB8
 };
+
+static_assert(__builtin_offsetof(TextPane, trans) == 0x2C);
+static_assert(__builtin_offsetof(TextPane, scale) == 0x44);
+static_assert(__builtin_offsetof(TextPane, alpha) == 0xB8);
 
 struct TextHandler {
     TextPane* pane;
@@ -83,6 +93,31 @@ bool CopyRaceNotice(u8 slot, wchar_t (&output)[128], u32& generation)
             return FormatSeriesSpectatorNotice(output, spectator);
         }
         return true;
+    }
+    auto*       race    = mkw::RaceManager::Instance();
+    auto*       configs = mkw::RaceConfigManager::Instance();
+    const auto* plan    = OnlineCPU::CurrentPlan();
+    if (slot == 0 && race && configs && plan && OnlineCPU::RaceKnockoutEnabled() &&
+        OnlineCPU::KnockoutRoundCommitted() && OnlineCPU::RaceKnockoutSeriesComplete() &&
+        static_cast<u32>(race->m_state) >= 3 && static_cast<u32>(race->m_state) <= 4 &&
+        race->m_players &&
+        configs->getConfig().playerCount() == plan->humanCount + plan->cpuCount) {
+        u8 winner = 0xFF;
+        for (u8 id = 0; id < plan->humanCount + plan->cpuCount; ++id) {
+            const auto* player = race->m_players[id];
+            if (!player || player->m_id != id)
+                return false;
+            if (!IsEliminated(id) &&
+                !(player->m_stateFlags & mkw::RaceManager::Player::FLAG_DISCONNECTED)) {
+                if (winner != 0xFF)
+                    return false;
+                winner = id;
+            }
+        }
+        const bool cpu    = winner != 0xFF && OnlineCPU::IsCPUSlot(winner);
+        const u8   number = winner == 0xFF ? 0 : cpu ? winner - plan->humanCount + 1 : winner + 1;
+        generation        = 0x80000000u | (cpu ? 0x100u : 0) | number;
+        return FormatSeriesCompleteNotice(output, number, cpu);
     }
     // While the local player is still racing, show no notice here: the
     // "racers remaining" message sat in the bottom-left corner on top of the
@@ -169,6 +204,50 @@ bool RestoreNativeMessage(FinishMessageControl* control)
     return true;
 }
 
+// --- Speedometer: show the local kart's speed in a bottom corner ------------
+// Ordinary (non-Knockout) online VS has no native speed readout. When no race
+// notice is active, reuse this finish-message control to display the local
+// kart's speed: translate and scale its root pane into a bottom corner and
+// publish the text through the verified SetMessage path. Knockout races keep
+// the pane for their notice (speed is gated off), so that HUD is untouched.
+// Placement constants are starting values, calibrated from a live view.
+constexpr float SPEED_TRANS_X = 0.0f;
+constexpr float SPEED_TRANS_Y = 170.0f;
+constexpr float SPEED_SCALE   = 0.55f;
+
+constinit FinishMessageControl* s_speedControl    = nullptr;
+constinit float                 s_speedTrans[3]   = {};
+constinit float                 s_speedScale[2]   = {};
+constinit bool                  s_speedOwned      = false;
+constinit u32                   s_speedGeneration = 0;
+
+// True when the speedometer may drive this control now: first local HUD slot,
+// outside Knockout, with no native finish/results message pending.
+bool SpeedEligible(FinishMessageControl* control)
+{
+    // Active racers in ordinary VS and in Knockdown/Knockout alike. In knockout
+    // this control is only taken for the spectator notice once eliminated (via
+    // CopyRaceNotice), so an active racer's pane is free for the speedometer.
+    // First local HUD slot only, and never over a native finish/results message.
+    return control && control->hudSlot == 0 && control->nativeMessageId == 0;
+}
+
+// Put the root pane back where native Update left it when we first took it.
+void RestoreSpeedPane(FinishMessageControl* control)
+{
+    if (!s_speedOwned || s_speedControl != control)
+        return;
+    if (control->root) {
+        control->root->trans[0] = s_speedTrans[0];
+        control->root->trans[1] = s_speedTrans[1];
+        control->root->trans[2] = s_speedTrans[2];
+        control->root->scale[0] = s_speedScale[0];
+        control->root->scale[1] = s_speedScale[1];
+    }
+    s_speedOwned   = false;
+    s_speedControl = nullptr;
+}
+
 bool HasFinishNoticeStarted(FinishMessageControl* control)
 {
     if (!control)
@@ -179,6 +258,10 @@ bool HasFinishNoticeStarted(FinishMessageControl* control)
     wchar_t notice[128];
     u32     generation;
     if (CopyRaceNotice(control->hudSlot, notice, generation))
+        return true;
+    wchar_t speed[128];
+    u32     speedGeneration;
+    if (SpeedEligible(control) && Speedometer::CurrentDisplay(speed, speedGeneration))
         return true;
     // The native predicate waits for the local FINISHED flag. A spectator
     // deliberately stays unfinished until canonical completion, but its pane
@@ -197,6 +280,10 @@ void UpdateFinishNotice(FinishMessageControl* control)
         !control->text || !control->common.loaded()) {
         if (control == s_lastNoticeControl)
             ClearNoticeCache();
+        if (control == s_speedControl) {
+            s_speedOwned   = false;
+            s_speedControl = nullptr;
+        }
         return;
     }
     // The race tick can publish a new camera target from another thread.
@@ -205,7 +292,75 @@ void UpdateFinishNotice(FinishMessageControl* control)
     wchar_t notice[128];
     u32     generation = 0;
     auto*   race       = mkw::RaceManager::Instance();
+    // Diagnostic (wl:spd_dbg): ~1 Hz during a race, record how far the
+    // speedometer path gets on this control, so a no-show localises without a
+    // blind rebuild. 1 hook ran | 2 slot 0 | 4 no native msg | 8 speed ready |
+    // 16 text handler found. A healthy active racer reports 31.
+    {
+        static constinit u32 s_speedDebugFrame = 0;
+        if (race && race->m_state == mkw::RaceManager::EState::RACE &&
+            (s_speedDebugFrame++ % 30) == 0) {
+            wchar_t dbg[128];
+            u32     dbgGen = 0;
+            u32     bits   = 1;
+            if (control->hudSlot == 0)
+                bits |= 2;
+            if (control->nativeMessageId == 0)
+                bits |= 4;
+            if (Speedometer::CurrentDisplay(dbg, dbgGen))
+                bits |= 8;
+            if (FindText(control))
+                bits |= 16;
+            GPReport::ReportU32("wl:spd_dbg", bits);
+        }
+    }
     if (!CopyRaceNotice(control->hudSlot, notice, generation)) {
+        // No race notice. In ordinary (non-Knockout) online VS, show the local
+        // kart's speed in a bottom corner using this same control's text path.
+        wchar_t speed[128];
+        u32     speedGeneration = 0;
+        if (SpeedEligible(control) && Speedometer::CurrentDisplay(speed, speedGeneration)) {
+            TextHandler* handler = FindText(control);
+            if (!handler) {
+                RestoreSpeedPane(control);
+                return;
+            }
+            if (!s_speedOwned || s_speedControl != control) {
+                // Take ownership: remember the native placement so it can be
+                // restored when a real message or the next race needs the pane.
+                s_speedControl  = control;
+                s_speedTrans[0] = control->root->trans[0];
+                s_speedTrans[1] = control->root->trans[1];
+                s_speedTrans[2] = control->root->trans[2];
+                s_speedScale[0] = control->root->scale[0];
+                s_speedScale[1] = control->root->scale[1];
+                s_speedOwned      = true;
+                s_speedGeneration = ~speedGeneration; // force a publish now
+            }
+            if (speedGeneration != s_speedGeneration) {
+                BmgView                menu = {};
+                [[gnu::longcall]] void load(BmgView*, const char*) AT(0x805F8B90);
+                load(&menu, "Menu");
+                if (!menu.loaded())
+                    return;
+                mkw::UI::FormatParam   format{ .strings = { speed } };
+                [[gnu::longcall]] void setMessage(
+                    TextHandler*, const BmgView&, const BmgView&, u32,
+                    const mkw::UI::FormatParam*
+                ) AT(0x805CDD00);
+                setMessage(handler, menu, control->common, 0x19CA, &format);
+                s_speedGeneration = speedGeneration;
+            }
+            control->root->trans[0] = SPEED_TRANS_X;
+            control->root->trans[1] = SPEED_TRANS_Y;
+            control->root->scale[0] = SPEED_SCALE;
+            control->root->scale[1] = SPEED_SCALE;
+            control->hidden      = false;
+            control->root->alpha = 255;
+            control->text->alpha = 255;
+            return;
+        }
+        RestoreSpeedPane(control);
         if (control == s_lastNoticeControl && control->text == s_lastNoticePane &&
             race == s_lastNoticeRace && !RestoreNativeMessage(control))
             return;
@@ -213,6 +368,7 @@ void UpdateFinishNotice(FinishMessageControl* control)
             ClearNoticeCache();
         return;
     }
+    RestoreSpeedPane(control);
     if (control != s_lastNoticeControl || control->text != s_lastNoticePane ||
         race != s_lastNoticeRace || generation != s_lastNoticeGeneration ||
         control->nativeMessageId != s_lastNativeMessageId) {
@@ -263,7 +419,7 @@ WWFC_DEFINE_PATCH =
 WWFC_DEFINE_PATCH =
     Patch::WritePointer(WWFC_PATCH_LEVEL_FEATURE, 0x808D3D28, RaceNotice::UpdateLapControl);
 
-// --- Elimination warning: red, blinking position number --------------------
+// --- Elimination warning: red-to-amber position number ----------------------
 // PAL retail stores the transparent position_l_00 overlay at control+0x1A0.
 // The visible rank is the separate Picture named "position". Select that exact
 // pane through the same nonvirtual layout lookup used by native rank Init;
@@ -292,8 +448,9 @@ constexpr u32 PICTURE_COLOUR_END = 0xE8;
 constexpr u32 PANE_NAME          = 0xBC;
 constexpr u32 PANE_PARENT        = 0x0C;
 constexpr u32 CONTROL_HIDDEN     = 0x80;
-// At 60 HUD updates per second: half a second visible, half a second hidden.
-constexpr u32 BLINK_HALF_PERIOD = 30;
+// At 60 HUD updates per second: one second red -> amber, one second back.
+constexpr u32 GRADIENT_HALF_PERIOD = 60;
+constexpr u32 AMBER_GREEN          = 0xBF;
 
 [[gnu::longcall]] void  NativeRankInit(RankNumControl*) AT(0x807F48FC);
 [[gnu::longcall]] void  NativeRankUpdate(RankNumControl*) AT(0x8063DB00);
@@ -309,9 +466,21 @@ struct WarningState {
     u8              nativeHidden;
     u8              appliedHidden;
     bool            owned;
+    bool            visibilityOwned;
 };
 
 constinit WarningState s_warning[4] = {};
+
+u32 WarningTint(u32 frame)
+{
+    const u32 phase = frame % (2 * GRADIENT_HALF_PERIOD);
+    const u32 step  = phase <= GRADIENT_HALF_PERIOD ? phase : 2 * GRADIENT_HALF_PERIOD - phase;
+    // Integer smoothstep has zero slope at red/amber, so the pulse reverses
+    // gently. Its largest numerator fits u32; alpha is preserved per vertex.
+    const u32 green = AMBER_GREEN * step * step * (3 * GRADIENT_HALF_PERIOD - 2 * step) /
+                      (GRADIENT_HALF_PERIOD * GRADIENT_HALF_PERIOD * GRADIENT_HALF_PERIOD);
+    return 0xFF000000u | (green << 16);
+}
 
 bool InGameSpan(const void* pointer, u32 size)
 {
@@ -361,9 +530,10 @@ void RestoreWarning(WarningState& state, RankNumControl* control)
         }
     }
     u8& hidden = reinterpret_cast<u8*>(control)[CONTROL_HIDDEN];
-    if (hidden == state.appliedHidden)
+    if (state.visibilityOwned && hidden == state.appliedHidden)
         hidden = state.nativeHidden;
-    state.owned = false;
+    state.owned           = false;
+    state.visibilityOwned = false;
 }
 
 void InitRankNum(RankNumControl* control)
@@ -390,10 +560,27 @@ void UpdateRankNum(RankNumControl* control)
     if (!state || !IsRankControl(control))
         return;
 
-    // The placement number stays as the game draws it, in every state: while
-    // racing (no notice covers it now) and while spectating after elimination
-    // (the spectator notice shows the status separately). The warning blink
-    // below is the only thing that touches it.
+    // Use the same local-spectator/notice gate as the finish-message HUD. An
+    // elimination record alone can outlive spectating into results, and the
+    // watched racer's position must not decide whether this local HUD hides.
+    wchar_t notice[128];
+    u32     noticeGeneration;
+    if (RaceNotice::CopyRaceNotice(control->hudSlot, notice, noticeGeneration)) {
+        if (state->control != control) {
+            *state         = {};
+            state->control = control;
+        }
+        state->anchor          = control->positionPane;
+        state->picture         = nullptr; // visibility only; keep native colors
+        u8& hidden             = reinterpret_cast<u8*>(control)[CONTROL_HIDDEN];
+        state->nativeHidden    = hidden;
+        state->appliedHidden   = 1;
+        hidden                 = 1;
+        state->owned           = true;
+        state->visibilityOwned = true;
+        return;
+    }
+
     if (control->playerId >= 12 || !IsEliminationCandidate(static_cast<u8>(control->playerId))) {
         *state = {};
         return;
@@ -404,23 +591,23 @@ void UpdateRankNum(RankNumControl* control)
     }
     state->anchor  = control->positionPane;
     state->picture = NativeFindPane(reinterpret_cast<u8*>(control) + 0xA8, "position");
+    const u32 tint = WarningTint(state->frame);
+    state->frame   = (state->frame + 1) % (2 * GRADIENT_HALF_PERIOD);
     if (IsRankPicture(control, state->picture)) {
         auto* colours = reinterpret_cast<u32*>(static_cast<u8*>(state->picture) + PICTURE_COLOURS);
         for (u8 i = 0; i < 4; ++i) {
             state->original[i] = colours[i];
             // Big-endian RGBA: preserve each native vertex's alpha.
-            state->applied[i] = 0xFF000000u | (colours[i] & 0xFFu);
+            state->applied[i] = tint | (colours[i] & 0xFFu);
             colours[i]        = state->applied[i];
         }
     } else {
         state->picture = nullptr;
     }
-    u8& hidden           = reinterpret_cast<u8*>(control)[CONTROL_HIDDEN];
-    state->nativeHidden  = hidden;
-    const u8 blinkHidden = ((state->frame++ / BLINK_HALF_PERIOD) & 1) ? 1 : 0;
-    state->appliedHidden = state->nativeHidden ? state->nativeHidden : blinkHidden;
-    hidden               = state->appliedHidden;
-    state->owned         = true;
+    // Warning animation changes RGB only. Native visibility/alpha remain
+    // authoritative; only the spectator branch above hides this control.
+    state->visibilityOwned = false;
+    state->owned           = true;
 }
 
 } // namespace Placement

@@ -6,6 +6,8 @@
 #  include "import/mkw/net/NetManager.hpp"
 #  include "import/mkw/system/RaceConfig.hpp"
 #  include "import/mkw/system/RaceManager.hpp"
+#  include "import/mkw/ui/page/MessagePopupPage.hpp"
+#  include "import/mkw/ui/section/SectionManager.hpp"
 #  include "mkwKnockdownMode.hpp"
 #  include "mkwOnlineCPU.hpp"
 #  include "wwfcPatch.hpp"
@@ -17,7 +19,36 @@ namespace Grid
 
 using namespace mkw;
 
-constinit void* s_selection = nullptr;
+constinit void*             s_selection           = nullptr;
+constinit void*             s_completionSelection = nullptr;
+constinit mkw::UI::Section* s_completionSection   = nullptr;
+
+[[gnu::longcall]] mkw::UI::Page* NativeTopLayer(mkw::UI::Section*) AT(0x80622EA0);
+
+void ShowCompletedSeries(void* selection)
+{
+    if (!RaceKnockoutSeriesComplete()) {
+        s_completionSelection = nullptr;
+        s_completionSection   = nullptr;
+        return;
+    }
+    auto* manager = mkw::UI::SectionManager::Instance();
+    auto* section = manager ? manager->currentSection() : nullptr;
+    if (!section || (selection == s_completionSelection && section == s_completionSection))
+        return;
+    auto* popup = section->getPage<mkw::UI::MessagePopupPage>(mkw::UI::EPageID::POPUP_MESSAGE);
+    auto* page  = NativeTopLayer(section);
+    if (!popup || !page || page == popup)
+        return;
+    static constexpr wchar_t message[] =
+        L"Race Knockout is complete.\nThe host must close this room\nto finish the series.";
+    mkw::UI::FormatParam format{ .strings = { message } };
+    popup->reset();
+    popup->setWindowMessage(0x19CA, &format);
+    page->push(mkw::UI::EPageID::POPUP_MESSAGE, mkw::UI::Page::ENextType::FORWARD);
+    s_completionSelection = selection;
+    s_completionSection   = section;
+}
 
 bool IsVSSelection(const void* selection)
 {
@@ -208,6 +239,7 @@ void UpdateSelection(void* selection)
     // The server capability message can arrive after SELECT is constructed.
     // BeginSelection is idempotent while waiting, so retry until advertised.
     BeginSelection();
+    ShowCompletedSeries(selection);
     // GPCM/DWC processing and the payload Tick run independently of SELECT.
     // Hold its progression until every participant agrees the same roster.
     if (CanSelectAdvance())

@@ -4,6 +4,7 @@
 #  include "import/mkw/net/NetUserHandler.hpp"
 #  include "import/mkw/ui/page/WifiMenuPage.hpp"
 #  include "mkwKnockdownMode.hpp"
+#  include "mkwInactivity.hpp"
 #  include "wwfcPatch.hpp"
 
 namespace wwfc
@@ -39,6 +40,7 @@ static GameSpy::GPResult GetMessageOfTheDay(GameSpy::GPResult gpResult, const ch
         return gpResult;
     }
 
+    Inactivity::ResetSession();
     Knockdown::HandleLoginResponse(message);
 
     const char motdKey[] = "\\wl:motd\\";
@@ -178,6 +180,27 @@ WWFC_DEFINE_PATCH =
     wwfc::GPReport::ReportU32(
         "wl:mkw_select_cc", static_cast<u32>(selectHandler->getSendPacket().engineClass)
     );
+
+    // Voting diagnostic (report-first): record the vote bitmask, the chosen
+    // winning voter, and every AID's course vote next to the decided course, so
+    // eliminated-player voting can be understood from the log before excluding
+    // it. Behaviour-neutral: reads only, changes nothing.
+    wwfc::GPReport::ReportU32("wl:vote_mask", selectHandler->getAidsWithVote());
+    wwfc::GPReport::ReportU32(
+        "wl:vote_win", static_cast<u32>(selectHandler->getSendPacket().winningVoterAid)
+    );
+    for (u32 base = 0; base < 12; base += 4) {
+        u32 packed = 0;
+        for (u32 i = 0; i < 4; ++i) {
+            const u8 vote = static_cast<u8>(static_cast<ECourse>(
+                selectHandler->getReceivedPacket(static_cast<u8>(base + i)).player[0].courseVote
+            ));
+            packed |= static_cast<u32>(vote) << (i * 8);
+        }
+        char key[] = "wl:vote_v0";
+        key[9]     = static_cast<char>('0' + base / 4);
+        wwfc::GPReport::ReportU32(key, packed);
+    }
 }
     );
 

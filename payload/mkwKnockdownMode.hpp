@@ -6,7 +6,7 @@
 namespace wwfc::Knockdown
 {
 constexpr u32 MATCH_REGION     = 19279; // 0x4B4F; server RK key vs_19279.
-constexpr u32 PROTOCOL_VERSION = 3;
+constexpr u32 PROTOCOL_VERSION = 4;
 
 bool ServerAvailable();
 bool Selected();

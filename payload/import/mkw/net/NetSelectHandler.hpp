@@ -41,7 +41,7 @@ public:
         /* 0x20 */ u8                _20[0x34 - 0x20];
         /* 0x34 */ Enum<u8, ECourse> selectedCourse;
         /* 0x35 */ EPhase            phase;
-        /* 0x36 */ u8                _36;
+        /* 0x36 */ u8                winningVoterAid;
         /* 0x37 */ EngineClass       engineClass;
     };
 
@@ -50,6 +50,23 @@ public:
     Packet& getSendPacket()
     {
         return m_sendPacket;
+    }
+
+    // The per-AID received SELECT packets (each sender's votes/choices).
+    Packet& getReceivedPacket(u8 aid)
+    {
+        return m_receivedPackets[aid];
+    }
+
+    // Bitmask of AIDs that have submitted a vote this round.
+    u32 getAidsWithVote() const
+    {
+        return m_aidsWithVote;
+    }
+
+    void setAidsWithVote(u32 value)
+    {
+        m_aidsWithVote = value;
     }
 
     void decideCourse()
@@ -133,7 +150,8 @@ public:
 private:
     /* 0x000 */ u8     _000[0x008 - 0x000];
     /* 0x008 */ Packet m_sendPacket;
-    /* 0x040 */ u8     _040[0x3E0 - 0x040];
+    /* 0x040 */ Packet m_receivedPackets[12];
+    /* 0x2E0 */ u8     _2E0[0x3E0 - 0x2E0];
     /* 0x3E0 */ u32    m_aidsWithNewSelectPacket;
     /* 0x3E4 */ u8     _3E4[0x3E8 - 0x3E4];
     /* 0x3E8 */ u32    m_aidsWithNewMatchSettings;

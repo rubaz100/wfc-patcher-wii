@@ -21,6 +21,7 @@
 #include "mkwKnockout.cpp"
 #include "mkwKnockoutUI.cpp"
 #include "mkwPenalty.cpp"
+#include "mkwInactivity.cpp"
 #include "mkwOnlineCPU.cpp"
 #include "mkwOnlineCPUItems.cpp"
 #include "mkwOnlineCPUEvents.cpp"

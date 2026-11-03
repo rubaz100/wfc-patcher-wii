@@ -14,12 +14,14 @@
 #  include "mkwKnockout.hpp"
 #  include "mkwKnockoutNotice.hpp"
 #  include "mkwKnockoutState.hpp"
+#  include "mkwInactivity.hpp"
 #  include "mkwOnlineCPU.hpp"
 
 #  include "import/mkw/system/RaceConfig.hpp"
 #  include "import/mkw/system/RaceManager.hpp"
 #  include "import/revolution.h"
 #  include "wwfcGPReport.hpp"
+#  include "wwfcLog.hpp"
 #  include "wwfcPatch.hpp"
 #  include "wwfcTypes.h"
 
@@ -45,6 +47,8 @@ using namespace mkw;
 
 #  if WWFC_KNOCKOUT_APPLY
 [[gnu::longcall]] bool NativeIsOnlineVSInputIdle(void*, u32, u32, u32) AT(0x805235D4);
+// Both watchdogs return a canonical0/1: every early return loads r3=0;
+// the normal path copies r31, initialized0 and set1 only on a GM+114 write.
 [[gnu::longcall]] bool NativeCheckOnlineVSLowSpeed(void*) AT(0x8053EE50);
 [[gnu::longcall]] bool NativeCheckOnlineVSProgress(void*) AT(0x8053EFD4);
 [[gnu::longcall]] bool NativeCanOnlineVSRaceEnd(void*) AT(0x8053FA10);
@@ -155,9 +159,188 @@ bool IsLocalSpectator(RaceManager& race, RaceConfig& config)
               RaceManager::Player::FLAG_RETIRED));
 }
 
-bool IsOnlineVSInputIdle(void* input, u32 controllerIndex, u32 idleLimit, u32 unchangedLimit)
+struct VSWatchdogScope {
+    RaceManager* race;
+    RaceConfig*  config;
+    void*        mode;
+    u32          epoch;
+};
+
+// Diagnostic state is independent of the KO state, which is also reset during
+// ordinary VS loading/teardown. It never changes a native watchdog decision.
+constinit RaceManager* s_vsWatchdogRace     = nullptr;
+constinit u32          s_vsWatchdogEpoch    = 0;
+constinit u8           s_vsWatchdogReported = 0;
+
+template <class T>
+T ReadVSWatchdogField(const void* object, u32 offset)
 {
-    const bool idle = NativeIsOnlineVSInputIdle(input, controllerIndex, idleLimit, unchangedLimit);
+    T value;
+    std::memcpy(&value, static_cast<const u8*>(object) + offset, sizeof(value));
+    return value;
+}
+
+bool SuppressOnlineVSInactivity(const void* nativeMode = nullptr, u32 controller = 0xFF)
+{
+    if (!Inactivity::Enabled())
+        return false;
+    auto* race    = RaceManager::Instance();
+    auto* configs = RaceConfigManager::Instance();
+    if (!SpectatorInputDetail::Readable(race, 0x2C) ||
+        !SpectatorInputDetail::Readable(configs, sizeof(*configs)) ||
+        race->m_state != RaceManager::EState::RACE)
+        return false;
+    auto& config = configs->getConfig();
+    const u8 count = config.playerCount();
+    if (!config.isWifiVSRace() || !count || count > MAX_PLAYERS ||
+        !config.localPlayerCount() || config.localPlayerCount() > 2 ||
+        !SpectatorInputDetail::Readable(race->m_players, count * sizeof(void*)))
+        return false;
+    const void* mode = ReadVSWatchdogField<void*>(race, 0x10);
+    if (!SpectatorInputDetail::Readable(mode, 0x12C) || (nativeMode && mode != nativeMode) ||
+        ReadVSWatchdogField<RaceManager*>(mode, 4) != race)
+        return false;
+    for (u8 id = 0; id < count; ++id) {
+        const auto* configured = config.getPlayer(id);
+        const auto* player     = race->m_players[id];
+        if (configured->m_type == RaceConfigPlayer::EPlayerType::MASTER &&
+            (controller == 0xFF || configured->m_inputIndex == controller) &&
+            SpectatorInputDetail::Readable(player, 0x44) && player->m_id == id &&
+            !(player->m_stateFlags & (RaceManager::Player::FLAG_FINISHED |
+                                     RaceManager::Player::FLAG_DISCONNECTED |
+                                     RaceManager::Player::FLAG_RETIRED)))
+            return true;
+    }
+    return false;
+}
+
+bool GetVSWatchdogScope(VSWatchdogScope& scope, const void* nativeMode = nullptr)
+{
+    auto*       race    = RaceManager::Instance();
+    auto*       configs = RaceConfigManager::Instance();
+    const auto* plan    = OnlineCPU::CurrentPlan();
+    if (!race || !configs || !plan || !plan->epoch || !plan->humanCount || !plan->cpuCount ||
+        plan->humanCount + plan->cpuCount > MAX_PLAYERS ||
+        !OnlineCPU::IsCPUSlot(plan->humanCount) || plan->knockoutEnabled || plan->knockoutMode ||
+        race->m_state != RaceManager::EState::RACE || !configs->getConfig().isWifiVSRace() ||
+        configs->getConfig().playerCount() != plan->humanCount + plan->cpuCount)
+        return false;
+    // Raceinfo+10 is its existing GMData, whose owner Raceinfo is stored at+4.
+    void* mode = ReadVSWatchdogField<void*>(race, 0x10);
+    if (!SpectatorInputDetail::Readable(mode, 0x12C) || (nativeMode && mode != nativeMode) ||
+        ReadVSWatchdogField<RaceManager*>(mode, 4) != race)
+        return false;
+    if (s_vsWatchdogRace != race || s_vsWatchdogEpoch != plan->epoch) {
+        s_vsWatchdogRace     = race;
+        s_vsWatchdogEpoch    = plan->epoch;
+        s_vsWatchdogReported = 0;
+    }
+    scope = { race, &configs->getConfig(), mode, plan->epoch };
+    return true;
+}
+
+bool IsUnfinishedVSWatchdogLocal(const VSWatchdogScope& scope, u32 controller)
+{
+    const u8 count = scope.config->playerCount();
+    if (controller >= 4 ||
+        !SpectatorInputDetail::Readable(scope.race->m_players, count * sizeof(void*)))
+        return false;
+    for (u32 slot = 0; slot < 2; ++slot) {
+        const u8 id = ReadVSWatchdogField<u8>(scope.mode, 0x108 + slot);
+        if (id >= count)
+            continue;
+        const auto* configured = scope.config->getPlayer(id);
+        const auto* player     = scope.race->m_players[id];
+        if (configured->m_type == RaceConfigPlayer::EPlayerType::MASTER &&
+            configured->m_inputIndex == controller &&
+            SpectatorInputDetail::Readable(player, 0x44) && player->m_id == id &&
+            !(player->m_stateFlags & RaceManager::Player::FLAG_FINISHED))
+            return true;
+    }
+    return false;
+}
+
+// Native big-endian snapshot, version1. u16/u32 fields retain their exact
+// native values. The GP record is best effort; OSReport retains the same
+// observation if native teardown closes GP before the normal queued flush.
+struct VSWatchdogRecord {
+    u8  version, reason, local0, local1;
+    u32 epoch, frame;
+    u8  controller, result, before, after;
+    u16 unchanged, disconnected;
+    u16 lowWarm0, lowAccum0, progress0;
+    u16 lowWarm1, lowAccum1, progress1;
+};
+
+static_assert(sizeof(VSWatchdogRecord) == 32);
+
+void ReportVSWatchdog(
+    const VSWatchdogScope& scope, u8 reason, bool result, u8 before, u8 after,
+    void* input = nullptr, u32 controller = 0xFF
+)
+{
+    if (reason < 1 || reason > 3 || (reason == 1 && controller >= 4))
+        return;
+    const u8 bit = 1u << (reason == 1 ? controller : reason + 2);
+    if (s_vsWatchdogReported & bit)
+        return;
+    s_vsWatchdogReported |= bit;
+    VSWatchdogRecord record = {};
+    record.version          = 1;
+    record.reason           = reason;
+    // GMDataOnlineVS::Init8053E370 fills these with MASTER racer IDs only.
+    record.local0     = ReadVSWatchdogField<u8>(scope.mode, 0x108);
+    record.local1     = ReadVSWatchdogField<u8>(scope.mode, 0x109);
+    record.epoch      = scope.epoch;
+    record.frame      = ReadVSWatchdogField<u32>(scope.race, 0x20);
+    record.controller = static_cast<u8>(controller);
+    record.result     = result;
+    record.before     = before;
+    record.after      = after;
+    record.unchanged = record.disconnected = 0xFFFF;
+    if (controller < 4 && SpectatorInputDetail::Readable(input, 0x3B4)) {
+        // Native805235D4 reads manager+index*EC+C6/C8, i.e. the
+        // selected RealControllerHolder's+C2/C4 counters (holder starts+4).
+        record.unchanged    = ReadVSWatchdogField<u16>(input, controller * 0xEC + 0xC6);
+        record.disconnected = ReadVSWatchdogField<u16>(input, controller * 0xEC + 0xC8);
+    }
+    record.lowWarm0  = ReadVSWatchdogField<u16>(scope.mode, 0x116);
+    record.lowAccum0 = ReadVSWatchdogField<u16>(scope.mode, 0x11A);
+    record.progress0 = ReadVSWatchdogField<u16>(scope.mode, 0x128);
+    record.lowWarm1  = ReadVSWatchdogField<u16>(scope.mode, 0x118);
+    record.lowAccum1 = ReadVSWatchdogField<u16>(scope.mode, 0x11C);
+    record.progress1 = ReadVSWatchdogField<u16>(scope.mode, 0x12A);
+    const char* key  = reason == 1 ? "wl:vs_idle" : reason == 2 ? "wl:vs_low" : "wl:vs_progress";
+    WWFC_LOG_NOTICE_FMT(
+        "VS watchdog reason=%u epoch=%u frame=%u local=%u,%u controller=%u result=%u GM114=%u->%u "
+        "unchanged=%u disconnected=%u low0=%u,%u progress0=%u low1=%u,%u progress1=%u",
+        reason, record.epoch, record.frame, record.local0, record.local1, record.controller,
+        record.result, record.before, record.after, record.unchanged, record.disconnected,
+        record.lowWarm0, record.lowAccum0, record.progress0, record.lowWarm1, record.lowAccum1,
+        record.progress1
+    );
+    GPReport::ReportB64Encode(key, &record, sizeof(record));
+}
+
+bool IsOnlineVSInputIdle(void* input, u32 controllerIndex, u32 idleLimit, u32 disconnectedLimit)
+{
+    const bool idle = NativeIsOnlineVSInputIdle(input, controllerIndex, idleLimit, disconnectedLimit);
+    if (idle) {
+        VSWatchdogScope scope;
+        if (GetVSWatchdogScope(scope) && IsUnfinishedVSWatchdogLocal(scope, controllerIndex)) {
+            const u8 flag = ReadVSWatchdogField<u8>(scope.mode, 0x114);
+            // Mirror8053F250..8053F26C's configured local and FINISHED guard.
+            // This still records the predicate before its GM+114 write, not
+            // proof that a later disconnect was caused by this condition.
+            ReportVSWatchdog(scope, 1, idle, flag, flag, input, controllerIndex);
+        }
+    }
+    if (idle && controllerIndex < 4 && SuppressOnlineVSInactivity(nullptr, controllerIndex)) {
+        // Retail805235D4 tests unchanged-input+C6 against r5 and disconnected
+        // controller+C8 against r6. Disable only the former16-bit counter's
+        // threshold; retain the native device checks and real controller loss.
+        return NativeIsOnlineVSInputIdle(input, controllerIndex, 0xFFFFu, disconnectedLimit);
+    }
     if (!idle || controllerIndex > 3 || !IsSpectatorTestRoom())
         return idle;
     // The native check can expire before the first KO decision. Suppress only
@@ -171,6 +354,11 @@ bool IsOnlineVSInputIdle(void* input, u32 controllerIndex, u32 idleLimit, u32 un
 
 void CheckOnlineVSStalling(void* mode)
 {
+    // These native calls enforce only low-speed and no-progress inactivity.
+    // Normal race/time limits, the30-second finish grace and network teardown
+    // are elsewhere and remain native. No CPU/Knockout plan is required.
+    if (SuppressOnlineVSInactivity(mode))
+        return;
     auto* race    = RaceManager::Instance();
     auto* configs = RaceConfigManager::Instance();
     if (race && configs && IsLocalSpectator(*race, configs->getConfig())) {
@@ -182,8 +370,17 @@ void CheckOnlineVSStalling(void* mode)
             s_stallGuardReported = true;
         return;
     }
-    NativeCheckOnlineVSLowSpeed(mode);
-    NativeCheckOnlineVSProgress(mode);
+    VSWatchdogScope scope;
+    const bool      diagnose      = GetVSWatchdogScope(scope, mode);
+    const u8        beforeLow     = diagnose ? ReadVSWatchdogField<u8>(mode, 0x114) : 0;
+    const bool      low           = NativeCheckOnlineVSLowSpeed(mode);
+    const u8        afterLow      = diagnose ? ReadVSWatchdogField<u8>(mode, 0x114) : 0;
+    const bool      progress      = NativeCheckOnlineVSProgress(mode);
+    const u8        afterProgress = diagnose ? ReadVSWatchdogField<u8>(mode, 0x114) : 0;
+    if (diagnose && !beforeLow && afterLow)
+        ReportVSWatchdog(scope, 2, low, beforeLow, afterLow);
+    if (diagnose && !afterLow && afterProgress)
+        ReportVSWatchdog(scope, 3, progress, afterLow, afterProgress);
 }
 
 bool FinishGracePeriod(void* mode)
@@ -269,11 +466,22 @@ bool CanOnlineVSRaceEnd(void* mode)
 {
     const auto* race          = RaceManager::Instance();
     auto*       network       = NetManager::Instance();
+    const auto* plan          = OnlineCPU::CurrentPlan();
+    auto*       configs       = RaceConfigManager::Instance();
+    // A continued series can legitimately have one remaining console racing
+    // its agreed owner-side CPUs. No other AID is expected in that plan; a
+    // missing peer still remains a native teardown condition for every plan
+    // that actually contains multiple human consoles.
+    const bool singleConsoleSeries = OnlineCPU::RaceKnockoutEnabled() && plan &&
+        plan->humanCount == 1 && plan->cpuCount && OnlineCPU::IsOwner() && configs &&
+        configs->getConfig().isWifiVSRace() &&
+        configs->getConfig().playerCount() == plan->humanCount + plan->cpuCount;
     const bool awaitingCommit = OnlineCPU::RaceKnockoutEnabled()
                                     ? !OnlineCPU::KnockoutRoundCommitted()
                                     : ContinuousLapCount() && OnlineCPU::KnockoutWinnerId() == 0xFF;
     if (awaitingCommit && race && race->m_state == RaceManager::EState::RACE &&
-        OnlineCPU::OwnerAlive() && network && NativeIsConnectedToAnyone(network) && race->m_timer &&
+        OnlineCPU::OwnerAlive() && network &&
+        (NativeIsConnectedToAnyone(network) || singleConsoleSeries) && race->m_timer &&
         Milliseconds(race->m_timer->m_time[0]) <= RaceTimeBudget() && !RaceFrameBudgetExpired())
         return false;
     return NativeCanOnlineVSRaceEnd(mode);
@@ -559,7 +767,11 @@ void FinalizeRetired(RaceManager& race, const Snapshot& snapshot)
              (RaceManager::Player::FLAG_DISCONNECTED | RaceManager::Player::FLAG_RETIRED)) ||
             !(s_retireEffectMask & (1u << id)))
             continue;
-        u32 ms = FinalPlacementTimeMs(base, placement);
+        // Unranked late arrivals need a native finished row to complete RH2,
+        // but do not acquire a tournament placement from that synthetic time.
+        u32 ms = FinalPlacementTimeMs(
+            base, placement == UNRANKED_SPECTATOR ? MAX_PLAYERS : placement
+        );
         if (!ms)
             continue;
         auto finish           = race.m_timer->m_time[0];
@@ -575,7 +787,7 @@ void FinalizeRetired(RaceManager& race, const Snapshot& snapshot)
         } else {
             player->endRace(finish);
         }
-        if (!(s_resultReportedMask & (1u << id))) {
+        if (placement != UNRANKED_SPECTATOR && !(s_resultReportedMask & (1u << id))) {
             GPReport::ReportU32("wl:ko_result", (static_cast<u32>(id) << 8) | placement);
             s_resultReportedMask |= 1u << id;
         }
@@ -750,8 +962,9 @@ bool IsEliminationCandidate(u8 id)
         if (entrants < 2 || !(live & (1u << id)))
             return false;
         u8 threatened = plan->knockoutEliminationCount;
-        if (threatened >= entrants)
-            threatened = entrants - 1;
+        const u8 maxOut = entrants > 2 ? entrants - 2 : 1;
+        if (threatened > maxOut)
+            threatened = maxOut;
         if (terminal >= threatened)
             return false;
         threatened -= terminal;
@@ -832,7 +1045,10 @@ bool NormalizeRetiredFinish(RaceManager::Player& player)
     Snapshot snapshot = {};
     if (!ReadSnapshot(*race, s_gridCount, snapshot) || !s_raceState.survivorsFinished(snapshot))
         return false;
-    u32 ms = FinalPlacementTimeMs(FinalBase(*race, snapshot), s_raceState.placement(player.m_id));
+    const u8 placement = s_raceState.placement(player.m_id);
+    u32 ms = FinalPlacementTimeMs(
+        FinalBase(*race, snapshot), placement == UNRANKED_SPECTATOR ? MAX_PLAYERS : placement
+    );
     if (!ms)
         return false;
     player.m_raceFinishTime->m_minutes      = ms / 60000;
@@ -919,15 +1135,14 @@ void Tick()
         if (raceMode && !s_carriedSeeded) {
             if (!OnlineCPU::RaceKnockoutRosterReady())
                 return;
-            u16 mask = 0, places = 0;
+            u16 mask = 0;
             for (u8 id = 0; id < count; ++id) {
                 const u8 placement = OnlineCPU::InitialKnockoutPlacement(id);
                 if (!placement)
                     continue;
-                if (placement < 2 || placement > count || (places & (1u << placement)))
+                if (placement != UNRANKED_SPECTATOR && (placement < 2 || placement > MAX_PLAYERS))
                     return;
                 mask |= 1u << id;
-                places |= 1u << placement;
             }
             if (mask != OnlineCPU::InitialKnockoutMask() || mask == (1u << count) - 1)
                 return;

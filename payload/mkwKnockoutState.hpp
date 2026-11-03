@@ -7,7 +7,8 @@ namespace wwfc::Knockout
 
 // Keep the decision policy independent of game memory so it can be exercised
 // on the host, including invalid snapshots and races with finished players.
-constexpr u8 MAX_PLAYERS = 12;
+constexpr u8 MAX_PLAYERS        = 12;
+constexpr u8 UNRANKED_SPECTATOR = 0xFF;
 
 constexpr bool IsPacketRaceTime(u16 minutes, u8 seconds, u16 milliseconds, bool valid)
 {
@@ -123,7 +124,11 @@ public:
 
     void markEliminated(u8 id, u8 placement)
     {
-        if (id < m_playerCount && placement >= 2 && placement <= m_playerCount) {
+        // A returning racer's historical series place can exceed this course's
+        // smaller native grid. New arrivals are unranked spectators, never
+        // contenders; neither value is used as an array index.
+        if (id < m_playerCount &&
+            ((placement >= 2 && placement <= MAX_PLAYERS) || placement == UNRANKED_SPECTATOR)) {
             m_eliminatedMask |= 1u << id;
             m_placements[id] = placement;
         }

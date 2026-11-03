@@ -6,6 +6,41 @@ namespace wwfc::Knockout
 {
 
 template <typename Char, decltype(sizeof(0)) N>
+bool FormatSeriesCompleteNotice(Char (&output)[N], u8 winner, bool cpu)
+{
+    static_assert(N > 0);
+    output[0] = 0;
+    if (winner > 12)
+        return false;
+    decltype(sizeof(0)) used   = 0;
+    auto                append = [&](const char* text) {
+        while (*text) {
+            if (used + 1 >= N) {
+                output[used] = 0;
+                return false;
+            }
+            output[used++] = static_cast<Char>(*text++);
+        }
+        output[used] = 0;
+        return true;
+    };
+    if (!append("Series complete\n"))
+        return false;
+    if (winner) {
+        char number[3] = {};
+        if (winner >= 10) {
+            number[0] = '1';
+            number[1] = '0' + winner % 10;
+        } else
+            number[0] = '0' + winner;
+        if (!append(cpu ? "Winner: CPU " : "Winner: Player ") || !append(number))
+            return false;
+    } else if (!append("Final results are ready"))
+        return false;
+    return append("\nHost: close this room");
+}
+
+template <typename Char, decltype(sizeof(0)) N>
 bool FormatRaceKnockoutNotice(
     Char (&output)[N], u8 remaining, u8 total, u8 seriesRound, u8 eliminationCount
 )
@@ -48,9 +83,10 @@ template <typename Char, decltype(sizeof(0)) N>
 bool FormatSeriesSpectatorNotice(Char (&output)[N], const Char (&notice)[N])
 {
     static_assert(N > 0);
-    output[0]                = 0;
-    decltype(sizeof(0)) used = 0;
-    for (const char* text = "Eliminated from series"; *text; ++text) {
+    output[0]                    = 0;
+    decltype(sizeof(0)) used     = 0;
+    const char*         headline = notice[0] == 'S' ? "Series spectator" : "Eliminated from series";
+    for (const char* text = headline; *text; ++text) {
         if (used + 1 >= N) {
             output[used] = 0;
             return false;
@@ -111,7 +147,7 @@ bool FormatEliminationNotice(Char (&output)[N], u8 placement, bool spectating = 
 {
     static_assert(N > 0);
     output[0] = 0;
-    if (placement < 2 || placement > 12) {
+    if (placement != 0xFF && (placement < 2 || placement > 12)) {
         return false;
     }
     decltype(sizeof(0)) used   = 0;
@@ -126,6 +162,8 @@ bool FormatEliminationNotice(Char (&output)[N], u8 placement, bool spectating = 
         output[used] = 0;
         return true;
     };
+    if (placement == 0xFF)
+        return append("Series spectator") && (!spectating || append("\nNow spectating"));
     char number[3] = {};
     if (placement >= 10) {
         number[0] = '1';
