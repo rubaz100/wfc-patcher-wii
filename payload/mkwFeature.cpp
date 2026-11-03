@@ -4,7 +4,10 @@
 #  include "import/mkw/net/NetUserHandler.hpp"
 #  include "import/mkw/ui/page/WifiMenuPage.hpp"
 #  include "mkwKnockdownMode.hpp"
+#  include "mkwEliminatedVoting.hpp"
 #  include "mkwInactivity.hpp"
+#  include "mkwKnockout.hpp"
+#  include "mkwOnlineCPU.hpp"
 #  include "wwfcPatch.hpp"
 
 namespace wwfc
@@ -41,6 +44,7 @@ static GameSpy::GPResult GetMessageOfTheDay(GameSpy::GPResult gpResult, const ch
     }
 
     Inactivity::ResetSession();
+    EliminatedVoting::ResetSession();
     Knockdown::HandleLoginResponse(message);
 
     const char motdKey[] = "\\wl:motd\\";
@@ -118,6 +122,14 @@ WWFC_DEFINE_PATCH =
 
     NetSelectHandler* selectHandler = NetSelectHandler::Instance();
     if (selectHandler) {
+        // Eliminated series spectators must not influence the next track: force
+        // the local vote to NOT_SELECTED so the game drops it from the voter
+        // pool (confirmed in the log: non-voters are excluded from the winner).
+        // Self-mark only, so all clients stay in sync.
+        if (EliminatedVoting::Enabled() && OnlineCPU::IsLocalProfileSeriesEliminated()) {
+            selectHandler->getSendPacket().player[0].courseVote =
+                ECourse::CONTROL_VOTING_NOT_SELECTED;
+        }
         selectHandler->processKicks();
     }
 }
@@ -188,6 +200,12 @@ WWFC_DEFINE_PATCH =
     wwfc::GPReport::ReportU32("wl:vote_mask", selectHandler->getAidsWithVote());
     wwfc::GPReport::ReportU32(
         "wl:vote_win", static_cast<u32>(selectHandler->getSendPacket().winningVoterAid)
+    );
+    wwfc::GPReport::ReportU32(
+        "wl:vote_elim", (OnlineCPU::IsLocalProfileSeriesEliminated() ? 1u : 0u) |
+                            (OnlineCPU::RaceKnockoutEnabled() ? 2u : 0u) |
+                            (EliminatedVoting::Enabled() ? 4u : 0u) |
+                            (Knockout::IsLocalSeriesEliminated() ? 8u : 0u)
     );
     for (u32 base = 0; base < 12; base += 4) {
         u32 packed = 0;

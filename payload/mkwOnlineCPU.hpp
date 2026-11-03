@@ -47,6 +47,10 @@ bool RaceKnockoutEnabled();
 bool RaceKnockoutSeriesComplete();
 bool RaceKnockoutRosterReady();
 u8   InitialKnockoutPlacement(u8 playerId);
+// True when the local console's own profile is an eliminated human in the
+// current series, derived from the LCPU3:T tournament metadata (available
+// during SELECT, before the next grid is allocated). Used to abstain its vote.
+bool IsLocalProfileSeriesEliminated();
 u16  InitialKnockoutMask();
 bool KnockoutRoundCommitted();
 u16  KnockoutCourseDNFMask();

@@ -97,6 +97,9 @@ constinit u8           s_afkReportedMask    = 0;
 constinit bool         s_stallGuardReported = false;
 constinit u8           s_spectatorPlayer    = MAX_PLAYERS;
 constinit u8           s_spectatorTarget    = MAX_PLAYERS;
+// Persists across the per-race Reset(): the local human stays series-eliminated
+// through the SELECT phase so its next-track vote can be suppressed.
+constinit bool         s_localSeriesEliminated = false;
 constinit bool         s_followLeader       = true;
 constinit bool         s_inputReady         = false;
 constinit u32          s_previousInput      = 0;
@@ -600,6 +603,7 @@ bool ApplyElimination(RaceManager& race, u8 id, u8 placement, bool queueNotice =
     auto& config = RaceConfigManager::Instance()->getConfig();
     if (config.getPlayer(id)->m_type == RaceConfigPlayer::EPlayerType::MASTER) {
         s_spectatorPlayer   = id;
+        s_localSeriesEliminated = true;
         s_spectatorTarget   = MAX_PLAYERS;
         s_followLeader      = true;
         s_inputReady        = false;
@@ -909,6 +913,11 @@ u8 EliminationPlacement(u8 id)
     return IsSpectatorTestRoom() ? s_raceState.placement(id) : 0;
 }
 
+bool IsLocalSeriesEliminated()
+{
+    return s_localSeriesEliminated;
+}
+
 bool IsEliminationCandidate(u8 id)
 {
 #  if WWFC_KNOCKOUT_APPLY
@@ -1132,6 +1141,10 @@ void Tick()
 #  if WWFC_KNOCKOUT_APPLY
     if (IsSpectatorTestRoom()) {
         s_raceState.bind(count);
+        // A fresh series (nobody carried out yet) clears any stale local
+        // series-elimination so the vote is not abstained in a new series.
+        if (OnlineCPU::InitialKnockoutMask() == 0)
+            s_localSeriesEliminated = false;
         if (raceMode && !s_carriedSeeded) {
             if (!OnlineCPU::RaceKnockoutRosterReady())
                 return;

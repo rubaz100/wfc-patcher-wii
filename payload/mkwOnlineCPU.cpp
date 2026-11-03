@@ -14,6 +14,7 @@
 #    include "import/mkw/system/RaceConfig.hpp"
 #    include "import/mkw/system/RaceManager.hpp"
 #    include "import/mkw/system/System.hpp"
+#    include "mkwEliminatedVoting.hpp"
 #    include "mkwInactivity.hpp"
 #    include "mkwKnockdownMode.hpp"
 #    include "mkwKnockout.hpp"
@@ -473,6 +474,8 @@ void Buddy(void* connection, const BuddyMessage* argument, void* param)
                 return;
             if (Inactivity::HandleServerMessage(text))
                 return;
+            if (EliminatedVoting::HandleServerMessage(text))
+                return;
             if (!std::strncmp(text, "LCPU3:", 6)) {
                 Message(text);
                 return;
@@ -518,6 +521,18 @@ bool RaceKnockoutRosterReady()
         if (!CacheRacerIdentity(id))
             return false;
     return true;
+}
+
+bool IsLocalProfileSeriesEliminated()
+{
+    if (!s_tournamentReady)
+        return false;
+    const u32 self = Self();
+    for (u8 i = 0; i < s_carriedHumanCount; ++i) {
+        if (s_carriedHumanPID[i] == self && s_carriedHumanPlace[i] != 0)
+            return true;
+    }
+    return false;
 }
 
 u8 InitialKnockoutPlacement(u8 id)
@@ -1103,6 +1118,11 @@ bool RaceKnockoutSeriesComplete()
 }
 
 bool RaceKnockoutRosterReady()
+{
+    return false;
+}
+
+bool IsLocalProfileSeriesEliminated()
 {
     return false;
 }

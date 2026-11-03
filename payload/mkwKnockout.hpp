@@ -18,6 +18,10 @@ bool NormalizeRetiredFinish(mkw::RaceManager::Player& player);
 bool IsSpectatorTestRoom();
 bool IsEliminated(u8 playerId);
 u8   EliminationPlacement(u8 playerId);
+// True when the local human is a spectator in the current Race Knockout series
+// (carried out of a prior course). Used to abstain its map vote so an
+// eliminated player can't influence the next track choice.
+bool IsLocalSeriesEliminated();
 // Live warning only: Round marks its last unfinished racer; Race marks up to
 // the configured bottom 1/2 entrants after reserving slots for known DNFs/DCs
 // and retaining one series winner. Carried/finished racers are not warned.
